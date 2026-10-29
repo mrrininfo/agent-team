@@ -61,7 +61,9 @@ struct TeamView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Circle().fill(statusColor(p)).frame(width: 10, height: 10)
-                            .help(o.team.limitedProviders.contains(p) ? "Đang bị limit" : accounts.status[p]?.detail ?? "Đang kiểm tra…")
+                            .help(o.team.limitedProviders.contains(p)
+                                  ? "Đang bị limit" + (o.team.limitedUntil?[p.rawValue].map { ", tự thử lại lúc \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "")
+                                  : accounts.status[p]?.detail ?? "Đang kiểm tra…")
                         Text(p.title).bold()
                         if o.team.limitedProviders.contains(p) {
                             Button("Bỏ đánh dấu limit") { o.clearLimit(p) }

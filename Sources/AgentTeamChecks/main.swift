@@ -326,6 +326,20 @@ do {
     }
 }
 
+// Limits: Claude's "hit your 5-hour limit" counts, and its reset time is used instead of the fixed cooldown.
+do {
+    check(isLimitError("You've hit your 5-hour limit · resets 12:50am (Asia/Saigon)") && isLimitError("You've hit your weekly limit"),
+          "Claude session/weekly limit messages detected")
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "Asia/Saigon")!
+    let now = cal.date(from: DateComponents(year: 2026, month: 10, day: 29, hour: 23, minute: 22))!
+    let r = limitResetDate("You've hit your 5-hour limit · resets 12:50am (Asia/Saigon)", now: now)
+    check(r == cal.date(from: DateComponents(year: 2026, month: 10, day: 30, hour: 0, minute: 50)), "reset time rolls to the next day")
+    let r2 = limitResetDate("weekly limit · resets Nov 2, 9am (Asia/Saigon)", now: now)
+    check(r2 == cal.date(from: DateComponents(year: 2026, month: 11, day: 2, hour: 9)), "reset with a date")
+    check(limitResetDate("usage limit reached", now: now) == nil, "no time named")
+}
+
 // File links, attachments, network errors, sign-in status parsing.
 do {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-links-\(shortId())")
@@ -764,7 +778,32 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// A known reset time holds the provider until then, not just the cooldown.
+@MainActor func limitUntilScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-until-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let o = try Orchestrator(workspace: dir) { _, _, _, _ in "exit 1: You've hit your 5-hour limit · resets 11pm (Asia/Saigon)" }
+    o.gitStatus = { _ in nil }
+    o.team.autoFailover = false
+    let t = o.team.agents.first { $0.roleId == "testing" }!
+    o.team.agents[o.team.agents.firstIndex { $0.id == t.id }!].profile = Profile(.claude, "sonnet")
+    let c = o.newChat(agentId: t.id, title: "t")
+    o.send("viết test", to: c)
+    for _ in 0..<200 where o.chat(c)?.status != .limited { try? await Task.sleep(nanoseconds: 5_000_000) }
+    let until = o.team.limitedUntil?["claude"]
+    check(o.chat(c)?.status == .limited && o.chat(c)?.pending.count == 1 && until != nil, "limit keeps the work and records the reset time")
+    o.releaseExpiredLimits(now: Date().addingTimeInterval(TimeInterval(o.team.limitCooldownMinutes * 60 + 1)))
+    if let until, until > Date().addingTimeInterval(TimeInterval(o.team.limitCooldownMinutes * 60 + 1)) {
+        check(o.team.limitedProviders.contains(.claude), "not retried at the cooldown when the reset is later")
+    }
+    o.releaseExpiredLimits(now: (until ?? Date()).addingTimeInterval(1))
+    check(!o.team.limitedProviders.contains(.claude), "retried once the reset time passes")
+    o.stop(c)
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await limitUntilScenario()
 try await relayScenario()
 try await stallScenario()
 try await networkScenario()

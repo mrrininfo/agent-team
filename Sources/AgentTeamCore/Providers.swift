@@ -206,6 +206,8 @@ public func isLimitError(_ text: String) -> Bool {
         "rate_limit_error"
     ]
     if phrases.contains(where: { t.contains($0) }) { return true }
+    // Claude: "You've hit your 5-hour limit · resets 12:50am", "hit your weekly limit".
+    if t.range(of: #"hit your [a-z0-9 \-]{0,24}limit"#, options: .regularExpression) != nil { return true }
 
     let patterns429 = [
         "http 429", "http status 429", "error 429", "error: 429", "status: 429", "status 429",
@@ -224,4 +226,25 @@ public func isNetworkError(_ text: String) -> Bool {
             "network is unreachable", "could not resolve host", "getaddrinfo", "connection reset", "connection refused",
             "stream disconnected", "socket hang up", "fetch failed", "error sending request", "internet connection appears to be offline",
             "unable to connect", "dns error", "tls handshake"].contains { t.contains($0) }
+}
+
+/// When a limit message says the limit resets, e.g. Claude's "resets 12:50am (Asia/Saigon)" or "resets Nov 2, 9am".
+/// nil when the text names no time.
+public func limitResetDate(_ text: String, now: Date = Date()) -> Date? {
+    let pattern = #"resets\s+(?:([A-Za-z]{3})[a-z]*\.? (\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?"#
+    guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+          let m = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
+    func g(_ i: Int) -> String? { Range(m.range(at: i), in: text).map { String(text[$0]) } }
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = g(6).flatMap(TimeZone.init(identifier:)) ?? .current
+    var hour = Int(g(3)!)! % 12
+    if g(5)!.lowercased() == "pm" { hour += 12 }
+    var want = DateComponents(hour: hour, minute: Int(g(4) ?? "0") ?? 0)
+    if let mon = g(1), let day = g(2).flatMap(Int.init) {
+        let months = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+        guard let i = months.firstIndex(of: mon.lowercased()) else { return nil }
+        want.month = i + 1
+        want.day = day
+    }
+    return cal.nextDate(after: now, matching: want, matchingPolicy: .nextTime)
 }

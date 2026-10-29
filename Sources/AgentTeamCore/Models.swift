@@ -269,6 +269,9 @@ public struct Team: Codable, Sendable {
     public var limitedProviders: Set<Provider> = []
     /// Provider rawValue → when it hit its limit; it is retried after `limitCooldownMinutes`.
     public var limitedSince: [String: Date] = [:]
+    /// Provider rawValue → when its limit resets, if known (from the error text or the quota bar); retried then
+    /// instead of every `limitCooldownMinutes`. Optional so older team.json files decode.
+    public var limitedUntil: [String: Date]?
     public var limitCooldownMinutes = 30
     /// Provider rawValue → absolute binary path; empty means auto-detect from the login shell PATH.
     public var binaryPaths: [String: String] = [:]

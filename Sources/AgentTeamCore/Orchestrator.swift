@@ -274,15 +274,25 @@ public final class Orchestrator {
     public func clearLimit(_ p: Provider) {
         team.limitedProviders.remove(p)
         team.limitedSince[p.rawValue] = nil
+        team.limitedUntil?[p.rawValue] = nil
         retryLimited()
     }
 
     /// Limits reset on their own (Claude/Codex windows); retry a provider after cooldown so work continues unattended.
     public func releaseExpiredLimits(now: Date = Date()) {
         let cooldown = TimeInterval(team.limitCooldownMinutes * 60)
-        for p in team.limitedProviders where (team.limitedSince[p.rawValue] ?? .distantPast).addingTimeInterval(cooldown) <= now {
-            clearLimit(p)
+        for p in team.limitedProviders {
+            let until = team.limitedUntil?[p.rawValue] ?? (team.limitedSince[p.rawValue] ?? .distantPast).addingTimeInterval(cooldown)
+            if until <= now { clearLimit(p) }
         }
+    }
+
+    /// When a provider's limit lifts: the time in its error message, else the reset of a quota window that is used up,
+    /// else nil (retry after the cooldown). A minute is added so the retry lands after the reset.
+    func limitReset(_ provider: Provider, error: String, now: Date = Date()) -> Date? {
+        let fromQuota = quotas[provider.rawValue]?.windows.filter { $0.usedPercent >= 99 }.compactMap(\.resetsAt).max()
+        guard let d = limitResetDate(error, now: now) ?? fromQuota, d > now, d < now.addingTimeInterval(8 * 86400) else { return nil }
+        return d.addingTimeInterval(60)
     }
 
     /// After a provider comes back, chats parked as `limited` run again.
@@ -574,6 +584,10 @@ public final class Orchestrator {
         } else if let error, isLimitError(error) {
             team.limitedProviders.insert(profile.provider)
             team.limitedSince[profile.provider.rawValue] = Date()
+            let until = limitReset(profile.provider, error: error)
+            team.limitedUntil = (team.limitedUntil ?? [:]).merging([profile.provider.rawValue: until].compactMapValues { $0 }) { $1 }
+            let wait = until.map { "Thử lại \(profile.provider.title) lúc \($0.formatted(date: .abbreviated, time: .shortened)) (giờ reset)." }
+                ?? "Thử lại \(profile.provider.title) sau \(team.limitCooldownMinutes) phút."
             let canContinue = team.autoFailover && team.agent(c.agentId).flatMap(team.effectiveProfile) != nil
             update(chatId) {
                 $0.pending = $0.inFlight + $0.pending
@@ -582,7 +596,7 @@ public final class Orchestrator {
                 $0.reportedModel = nil
                 $0.reportedModelProvider = nil
                 $0.messages.append(Message(.system, "\(profile.provider.title) bị limit: \(clip(error, 300))\n"
-                    + (canContinue ? "Tự động chuyển sang provider dự phòng kèm gói bàn giao." : "Bật provider khác, thêm fallback cho vai trò, hoặc dùng Chuyển việc.")))
+                    + (canContinue ? "Tự động chuyển sang provider dự phòng kèm gói bàn giao. " : "Hết fallback; việc được giữ và tự chạy lại. ") + wait))
             }
         } else if let error, isNetworkError(error) || !online, (netRetries[chatId] ?? 0) < Self.netBackoff.count {
             update(chatId) { $0.pending = $0.inFlight + $0.pending; $0.inFlight = [] }
