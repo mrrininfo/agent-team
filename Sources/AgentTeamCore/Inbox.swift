@@ -45,6 +45,8 @@ public struct TeamPaths: Sendable {
     public var acks: URL { inbox.appendingPathComponent("acks", isDirectory: true) }
     public var chats: URL { root.appendingPathComponent("chats", isDirectory: true) }
     public var notes: URL { root.appendingPathComponent("notes", isDirectory: true) }
+    /// chatId → pid of the provider process running that chat's turn; lets a relaunch stop orphans.
+    public var runningFile: URL { root.appendingPathComponent("running.json") }
 
     public func chatFile(_ id: String) -> URL { chats.appendingPathComponent("\(id).json") }
     public func noteFile(_ id: String) -> URL { notes.appendingPathComponent("\(id).md") }

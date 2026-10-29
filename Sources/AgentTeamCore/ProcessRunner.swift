@@ -45,6 +45,39 @@ public final class ProcessRunner {
 
     public func cancel(_ chatId: String) { processes[chatId]?.terminate() }
 
+    static func recordRunning(_ paths: TeamPaths, _ chatId: String, _ pid: Int32?) {
+        var m = (try? Data(contentsOf: paths.runningFile)).flatMap { try? JSONDecoder().decode([String: Int32].self, from: $0) } ?? [:]
+        m[chatId] = pid
+        try? JSONEncoder().encode(m).write(to: paths.runningFile, options: .atomic)
+    }
+
+    /// Stops provider processes left behind by a previous run of the app (crash, force quit, kill): their output
+    /// would go nowhere while the requeued turn runs again, doubling quota use on the same session.
+    /// Returns how many were stopped.
+    @discardableResult
+    nonisolated public static func stopOrphans(_ paths: TeamPaths) -> Int {
+        guard let data = try? Data(contentsOf: paths.runningFile),
+              let m = try? JSONDecoder().decode([String: Int32].self, from: data) else { return 0 }
+        var stopped = 0
+        for pid in m.values where pid > 1 {
+            // Only our own provider CLIs: a recycled pid may now belong to something else.
+            let ps = Process()
+            ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+            ps.arguments = ["-o", "command=", "-p", String(pid)]
+            let out = Pipe()
+            ps.standardOutput = out
+            ps.standardError = FileHandle.nullDevice
+            guard (try? ps.run()) != nil else { continue }
+            let cmd = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            ps.waitUntilExit()
+            let ours = Provider.allCases.contains { cmd.contains("/\($0.binaryName) ") || cmd.contains("/\($0.binaryName)\n") }
+                && (cmd.contains(" -p") || cmd.contains(" exec"))
+            if ours, kill(pid, SIGTERM) == 0 { stopped += 1 }
+        }
+        try? FileManager.default.removeItem(at: paths.runningFile)
+        return stopped
+    }
+
     /// `binaryPath` is the workspace's custom path for this provider, if any (several workspaces share one runner).
     public func run(chatId: String, request: TurnRequest, cwd: URL, binaryPath: String? = nil,
                     onEvent: @escaping @MainActor (RunEvent) -> Void) async -> String? {
@@ -70,7 +103,12 @@ public final class ProcessRunner {
         }
         do { try proc.run() } catch { return "Không chạy được \(bin): \(error.localizedDescription)" }
         processes[chatId] = proc
-        defer { processes[chatId] = nil }
+        let paths = TeamPaths(workspace: cwd)
+        Self.recordRunning(paths, chatId, proc.processIdentifier)
+        defer {
+            processes[chatId] = nil
+            Self.recordRunning(paths, chatId, nil)
+        }
 
         if provider.promptViaStdin {
             let data = Data(request.prompt.utf8), h = inp.fileHandleForWriting

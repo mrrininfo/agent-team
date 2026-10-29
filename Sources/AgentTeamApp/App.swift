@@ -4,7 +4,17 @@ import SwiftUI
 
 @main
 struct AgentTeamApp: App {
-    init() { NSApplication.shared.setActivationPolicy(.regular) }
+    init() {
+        NSApplication.shared.setActivationPolicy(.regular)
+        // `kill`/SIGTERM would otherwise exit without willTerminate, leaving agent processes running unattended.
+        signal(SIGTERM, SIG_IGN)
+        let src = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        src.setEventHandler { NSApp.terminate(nil) }
+        src.resume()
+        Self.sigterm = src
+    }
+
+    static var sigterm: DispatchSourceSignal?
 
     var body: some Scene {
         // One window = one project. A window opened for a path (openWindow(value:)) opens that project;
@@ -180,6 +190,7 @@ final class AppModel {
             }
             box.o = o
             o.cancelTurn = { r.cancel($0) }
+            o.antigravityBinary = { r.binary(for: .antigravity, override: box.o?.team.binaryPaths[Provider.antigravity.rawValue]) }
             close()
             Self.owners[key] = Owner(self)
             orchestrator = o

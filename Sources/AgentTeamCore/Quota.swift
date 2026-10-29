@@ -87,3 +87,85 @@ public enum Quota {
         return nil
     }
 }
+
+// MARK: - Antigravity
+
+extension Quota {
+    /// agy has no headless quota output: its `/usage` panel exists only in the interactive TUI.
+    /// shortcut: drives that TUI through a pseudo-terminal and scrapes the text; breaks if the panel layout
+    /// changes. Upgrade when agy offers a machine-readable usage command.
+    public static func probeAntigravity(binary: String, workDir: URL) -> String? {
+        try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/script")
+        p.arguments = ["-q", "/dev/null", binary]
+        p.currentDirectoryURL = workDir
+        let inp = Pipe(), out = Pipe()
+        p.standardInput = inp
+        p.standardOutput = out
+        p.standardError = out
+        guard (try? p.run()) != nil else { return nil }
+        let keys: [(Double, String)] = [
+            (5, "\r"),                       // accepts the one-time "trust this folder" prompt; ignored otherwise
+            (2, "/usage"), (1.5, "\r"),
+            (7, "\u{1b}[6~"), (1, "\u{1b}[6~"), (1, "\u{1b}[6~"), (1, "\u{1b}[6~"),   // page through all groups
+            (1, "\u{1b}"), (1, "/exit"), (1, "\r"),
+        ]
+        let w = inp.fileHandleForWriting
+        DispatchQueue.global().async {
+            for (delay, k) in keys {
+                Thread.sleep(forTimeInterval: delay)
+                guard p.isRunning else { return }
+                w.write(Data(k.utf8))
+            }
+            Thread.sleep(forTimeInterval: 5)
+            if p.isRunning { p.terminate() }
+        }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Parses the `/usage` panel: per model group, "… Limit Remaining" + "[███░░] 67.74%" + "Refreshes in 116h 24m".
+    public static func parseAntigravity(_ raw: String, now: Date = Date()) -> [QuotaWindow] {
+        var text = raw
+        for pattern in ["\u{1b}\\[[0-9;?<>]*[ -/]*[@-~]", "\u{1b}\\][^\u{07}]*\u{07}", "\u{1b}[()][A-Z0-9]"] {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        text = text.replacingOccurrences(of: "\r", with: "\n")
+
+        func groupName(_ line: String) -> String {
+            line.hasPrefix("GEMINI") ? "Gemini" : line.hasPrefix("CLAUDE") ? "Claude/GPT" : line.capitalized
+        }
+        func windowName(_ label: String) -> String {
+            let span = label.contains("Five Hour") ? "5 giờ" : label.contains("Weekly") ? "tuần" : label
+            let model = label.components(separatedBy: " Weekly").first.flatMap { $0.hasPrefix("Weekly") || $0 == label ? nil : $0 }
+            return model.map { "\($0) · \(span)" } ?? span
+        }
+
+        var group = "", label = ""
+        var result: [String: QuotaWindow] = [:]
+        var order: [String] = []
+        var lastKey: String?
+        for rawLine in text.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasSuffix(" MODELS") { group = groupName(line); continue }
+            if line.contains("Limit"), !line.contains("%") { label = line; lastKey = nil; continue }
+            if line.hasPrefix("["), let r = line.range(of: #"([0-9]+(\.[0-9]+)?)%$"#, options: .regularExpression),
+               let remaining = Double(line[r].dropLast()), !label.isEmpty {
+                let isModelSpecific = !label.hasPrefix("Weekly") && !label.hasPrefix("Five")
+                let name = isModelSpecific ? windowName(label) : "\(group) · \(windowName(label))"
+                if result[name] == nil { order.append(name) }
+                result[name] = QuotaWindow(name: name, usedPercent: max(0, 100 - remaining), resetsAt: result[name]?.resetsAt)
+                lastKey = name
+                continue
+            }
+            if line.hasPrefix("Refreshes in"), let key = lastKey {
+                let h = line.range(of: #"([0-9]+)h"#, options: .regularExpression).flatMap { Double(line[$0].dropLast()) } ?? 0
+                let m = line.range(of: #"([0-9]+)m"#, options: .regularExpression).flatMap { Double(line[$0].dropLast()) } ?? 0
+                result[key]?.resetsAt = now.addingTimeInterval(h * 3600 + m * 60)
+            }
+        }
+        return order.compactMap { result[$0] }
+    }
+}

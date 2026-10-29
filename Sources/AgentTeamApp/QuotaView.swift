@@ -17,9 +17,10 @@ struct QuotaBar: View {
                 HStack(spacing: 6) {
                     Text(p == .antigravity ? "Antigravity" : p.title.components(separatedBy: " ")[0]).font(.caption.bold())
                     if let q = o.quotas[p.rawValue] {
-                        ForEach(q.windows, id: \.name) { w in
+                        // The bar shows the two most-used windows; the popover lists all of them.
+                        ForEach(Array(q.windows.sorted { $0.usedPercent > $1.usedPercent }.prefix(2)), id: \.name) { w in
                             HStack(spacing: 3) {
-                                Text(w.name).font(.caption2).foregroundStyle(.secondary)
+                                Text(w.name).font(.caption2).foregroundStyle(.secondary).lineLimit(1).fixedSize()
                                 ProgressView(value: min(max(w.usedPercent, 0), 100), total: 100)
                                     .tint(quotaColor(w.usedPercent)).frame(width: 46)
                                 Text("\(Int(w.usedPercent.rounded()))%").font(.caption2.monospacedDigit())
@@ -69,7 +70,7 @@ struct QuotaPanel: View {
                         Text("Cập nhật \(q.updated.formatted(Date.RelativeFormatStyle(presentation: .named, locale: vi)))").font(.caption2).foregroundStyle(.tertiary)
                     } else {
                         Text(p == .antigravity
-                             ? "Antigravity chưa cung cấp số liệu cho chế độ tự động. Xem trong Terminal: chạy agy rồi gõ /usage."
+                             ? "Đang đọc từ agy (khoảng 20 giây)… Bấm Làm mới nếu chưa thấy."
                              : "Chưa có dữ liệu — tự cập nhật sau lượt \(p.title) kế tiếp.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
@@ -79,7 +80,7 @@ struct QuotaPanel: View {
             HStack {
                 Text("Token dự án này: \(o.totalTokens.formatted())").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                Button("Làm mới") { o.refreshQuotas() }
+                Button("Làm mới") { o.refreshQuotas(force: true) }
             }
         }
         .padding()

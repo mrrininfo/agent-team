@@ -68,6 +68,33 @@ do {
     try? FileManager.default.removeItem(at: home)
 }
 
+// Antigravity /usage panel scraping (text as captured from the TUI, ANSI codes included).
+do {
+    let raw = "\u{1b}[2K GEMINI MODELS\r\n  Models within this group: Gemini Flash\r\n  Weekly Limit Remaining\r\n    [\u{1b}[32m███░░\u{1b}[0m] 67.74%\r\nRefreshes in 116h 24m\r\n  Five Hour Limit Remaining\r\n[███] 97.27%\r\nRefreshes in 2h 19m\r\n74%\r\nCLAUDE AND GPT MODELS\r\n  Weekly Limit Remaining\r\n[██░] 49.49%\r\nRefreshes in 116h 45m\r\n  Five Hour Limit Remaining\r\n[███] 100.00%\r\n  Gemini 4 Argon Weekly Limit\r\n[███] 99.73%\r\nRefreshes in 166h 10m\r\n"
+    let now = Date(timeIntervalSince1970: 0)
+    let w = Quota.parseAntigravity(raw, now: now)
+    check(w.map(\.name) == ["Gemini · tuần", "Gemini · 5 giờ", "Claude/GPT · tuần", "Claude/GPT · 5 giờ", "Gemini 4 Argon · tuần"], "agy names \(w.map(\.name))")
+    check(abs(w[0].usedPercent - 32.26) < 0.01 && w[0].resetsAt == now.addingTimeInterval(116 * 3600 + 24 * 60), "agy gemini weekly")
+    check(w[3].usedPercent == 0 && w[3].resetsAt == nil, "agy 5h full, no reset line")
+    check(w[4].resetsAt == now.addingTimeInterval(166 * 3600 + 10 * 60), "agy argon reset")
+}
+
+// Orphan cleanup only touches our own provider CLIs and clears the record.
+do {
+    let ws = FileManager.default.temporaryDirectory.appendingPathComponent("orph-\(shortId())")
+    let paths = TeamPaths(workspace: ws)
+    try paths.ensure()
+    let sleeper = Process()
+    sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    sleeper.arguments = ["30"]
+    try sleeper.run()
+    try JSONEncoder().encode(["c1": sleeper.processIdentifier]).write(to: paths.runningFile)
+    check(ProcessRunner.stopOrphans(paths) == 0 && sleeper.isRunning, "non-provider pid left alone")
+    check(!FileManager.default.fileExists(atPath: paths.runningFile.path), "running record cleared")
+    sleeper.terminate()
+    try? FileManager.default.removeItem(at: ws)
+}
+
 // Arguments
 do {
     let r = TurnRequest(prompt: "x", profile: Profile(.codex, "gpt-6.1-sol", effort: "high"), sessionId: "t1", access: .write)

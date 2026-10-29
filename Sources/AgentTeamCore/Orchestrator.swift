@@ -20,6 +20,10 @@ public final class Orchestrator {
     @ObservationIgnored var stopping: Set<String> = []
     @ObservationIgnored var timer: Timer?
     @ObservationIgnored var ticks = 0
+    /// Path of the `agy` binary, if installed (set by the app); used only to read Antigravity's quota panel.
+    @ObservationIgnored public var antigravityBinary: () -> String? = { nil }
+    /// One probe at a time across all windows: each run drives agy's TUI for ~20 s.
+    static var antigravityProbeRunning = false
     /// Set when the workspace is closed or switched away from: nothing new starts, running turns are requeued.
     @ObservationIgnored public private(set) var suspended = false
 
@@ -42,7 +46,8 @@ public final class Orchestrator {
         let files = (try? FileManager.default.contentsOfDirectory(at: paths.chats, includingPropertiesForKeys: nil)) ?? []
         chats = files.compactMap { try? jsonDecoder.decode(Chat.self, from: Data(contentsOf: $0)) }
             .sorted { ($0.messages.first?.date ?? .distantPast) < ($1.messages.first?.date ?? .distantPast) }
-        // Crash/quit recovery: work that was running or waiting is queued again.
+        // Crash/quit recovery: stop provider processes orphaned by the previous run, then queue unfinished work again.
+        ProcessRunner.stopOrphans(paths)
         for c in chats where c.status == .running || c.status == .queued {
             update(c.id) { $0.pending = $0.inFlight + $0.pending; $0.inFlight = []; $0.status = $0.pending.isEmpty ? .idle : .queued }
         }
@@ -348,11 +353,33 @@ public final class Orchestrator {
     public func stopInboxPolling() { timer?.invalidate() }
 
     /// Re-reads limits: Claude's from the shared file (other windows may have updated it), Codex's from its session files.
-    public func refreshQuotas() {
+    public func refreshQuotas(force: Bool = false) {
         var q = Quota.load()
         if let c = Quota.readCodex() { q[Provider.codex.rawValue] = c }
         quotas = q
         Quota.save(q)
+        refreshAntigravityQuota(force: force)
+    }
+
+    /// Antigravity's quota costs no tokens but ~20 s of a background agy session, so at most every 10 minutes.
+    func refreshAntigravityQuota(force: Bool) {
+        let key = Provider.antigravity.rawValue
+        let stale = Date().timeIntervalSince(quotas[key]?.updated ?? .distantPast) > 600
+        guard (force || stale), !Self.antigravityProbeRunning, !team.disabledProviders.contains(.antigravity),
+              let bin = antigravityBinary() else { return }
+        Self.antigravityProbeRunning = true
+        let dir = Quota.file.deletingLastPathComponent().appendingPathComponent("agy-usage")
+        Task.detached {
+            let windows = Quota.probeAntigravity(binary: bin, workDir: dir).map { Quota.parseAntigravity($0) } ?? []
+            await MainActor.run {
+                Self.antigravityProbeRunning = false
+                guard !windows.isEmpty else { return }
+                var q = Quota.load()
+                q[key] = ProviderQuota(windows: windows, updated: Date())
+                Quota.save(q)
+                self.quotas = q
+            }
+        }
     }
 
     public func processInbox() {
