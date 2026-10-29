@@ -95,6 +95,15 @@ struct ChatView: View {
                 }
             }
             ProfileEditor(profile: profile)
+            if let t = c.lastTiming {
+                Text("Lượt cuối: tín hiệu đầu sau \(t.firstSignal.map(Self.seconds) ?? "—") · tổng \(Self.seconds(t.total)) · \(t.provider)")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .help("Tín hiệu đầu = thời gian CLI khởi động, nạp phiên/plugin/MCP tới lúc in ra dòng đầu tiên. Mọi lượt được ghi ở .agentteam/logs/turns.csv")
+            }
+            if let r = c.relay {
+                Text("\(r.mode == .debate ? "Đang phản biện tự động" : "Đang nghiệm thu tự động") với \(o.team.agent(r.reviewerAgent).flatMap { o.team.role($0.roleId) }?.name ?? r.reviewerAgent) · vòng \(r.round)/\(r.maxRounds)")
+                    .font(.caption).foregroundStyle(.blue)
+            }
             if let to = c.replyTo {
                 Text("Kết quả sẽ báo về chat \(to) · \(o.chat(to)?.title ?? "")").font(.caption).foregroundStyle(.secondary)
             }
@@ -127,6 +136,10 @@ struct ChatView: View {
             }
             .padding(.horizontal, 12).padding(.top, 8)
         }
+    }
+
+    static func seconds(_ t: TimeInterval) -> String {
+        t < 60 ? String(format: "%.0f giây", t) : "\(Int(t) / 60) phút \(Int(t) % 60) giây"
     }
 
     func sendDraft() {

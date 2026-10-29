@@ -5,7 +5,8 @@ let usage = """
 agentteam — giao việc giữa các agent trong Agent Team
 
   agentteam agents
-  agentteam dispatch [--from <chatId>] --to <agentId|role> (--new-task "<tiêu đề>" | --tab <chatId>) "<nội dung>" | -
+  agentteam dispatch [--from <chatId>] --to <agentId|role> (--new-task "<tiêu đề>" | --tab <chatId>)
+                     [--debate <role> | --verify <role>] [--rounds N] "<nội dung>" | -
   agentteam show <chatId>          # trả lời cuối của một chat
   agentteam status <handoffId>     # ACK của một lần giao
 
@@ -59,13 +60,18 @@ case "dispatch":
     let to = option("--to")
     let title = option("--new-task")
     let tab = option("--tab")
+    let debate = option("--debate"), verify = option("--verify")
+    let rounds = option("--rounds")
+    guard debate == nil || verify == nil else { fail("Chỉ dùng một trong --debate hoặc --verify.") }
+    guard rounds.map({ Int($0) != nil }) ?? true else { fail("--rounds phải là số.") }
     guard let from else { fail("Thiếu --from <chatId>.") }
     guard let to else { fail("Thiếu --to <agentId|role>.") }
     guard (title == nil) != (tab == nil) else { fail("Dùng đúng một trong --new-task \"<tiêu đề>\" hoặc --tab <chatId>.") }
     var body = args.joined(separator: " ")
     if body == "-" { body = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self) }
     guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { fail("Thiếu nội dung giao việc.") }
-    let req = DispatchRequest(from: from, to: to, title: title, tab: tab, body: body)
+    let req = DispatchRequest(from: from, to: to, title: title, tab: tab, body: body, reviewer: debate ?? verify,
+                              mode: debate != nil ? .debate : verify != nil ? .verify : nil, rounds: rounds.flatMap { Int($0) })
     let tmp = paths.inbox.appendingPathComponent(".\(req.id).tmp")
     do {
         try jsonEncoder.encode(req).write(to: tmp)

@@ -9,19 +9,28 @@ public struct DispatchRequest: Codable, Sendable {
     public var title: String?
     public var tab: String?
     public var body: String
+    /// Optional automatic review loop: the app sends the result to `reviewer` and back without the dispatcher.
+    public var reviewer: String?
+    public var mode: Relay.Mode?
+    public var rounds: Int?
 
-    public init(id: String = shortId(), from: String, to: String, title: String?, tab: String?, body: String) {
+    public init(id: String = shortId(), from: String, to: String, title: String?, tab: String?, body: String,
+                reviewer: String? = nil, mode: Relay.Mode? = nil, rounds: Int? = nil) {
         self.id = id
         self.from = from
         self.to = to
         self.title = title
         self.tab = tab
         self.body = body
+        self.reviewer = reviewer
+        self.mode = mode
+        self.rounds = rounds
     }
 
     /// Stable SHA-256 fingerprint of the request payload to detect replays vs conflicting payloads.
     public var fingerprint: String {
-        let raw = "\(from)|\(to)|\(title ?? "")|\(tab ?? "")|\(body)"
+        var raw = "\(from)|\(to)|\(title ?? "")|\(tab ?? "")|\(body)"
+        if let reviewer { raw += "|\(reviewer)|\(mode?.rawValue ?? "")|\(rounds ?? 0)" }
         return SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }

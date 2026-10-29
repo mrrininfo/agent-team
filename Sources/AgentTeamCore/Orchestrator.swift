@@ -392,6 +392,11 @@ public final class Orchestrator {
             - Nội dung giao phải tự đủ: phạm vi, đầu ra, bằng chứng cần báo cáo (agent nhận không thấy cuộc trò chuyện này).
             - ACK `queued/started` chỉ là đã xếp hàng. Giao xong thì kết thúc lượt; kết quả tự gửi về chat này.
             - Xem đầy đủ một kết quả bị cắt: `agentteam show <chatId>`.
+            - Tự rà soát, không cần bạn chuyển tay (tiết kiệm lượt của bạn):
+              - Phản biện: thêm `--debate critic` (vd. `--to planner --debate critic`). App tự chuyển qua lại planner ↔ critic
+                tới khi critic ghi "\(Relay.agreed)" hoặc hết số vòng ở mục Thảo luận; bạn chỉ nhận bản chốt kèm ý kiến cuối của critic.
+              - Làm + nghiệm thu: thêm `--verify testing` (vd. `--to worker --verify testing`). Testing KHÔNG ĐẠT thì app tự gửi lại
+                worker sửa (tối đa 3 vòng, đổi bằng `--rounds N`); bạn chỉ nhận kết luận cuối.
 
             ## Thảo luận
             - Số vòng phản biện planner ↔ critic tối đa: \(team.debateRounds ?? 2) (con số này thay cho số vòng ghi trong hợp đồng; người dùng ghi số khác thì theo người dùng).
@@ -470,8 +475,11 @@ public final class Orchestrator {
         let req = TurnRequest(prompt: prompt, profile: profile, sessionId: resumable ? c.sessionId : nil,
                               access: role.access, canDispatch: role.canDispatch)
         lastSignal[chatId] = Date()
+        let started = Date()
+        var firstSignal: TimeInterval?
         let exitError = await runner(chatId, req, paths.workspace) { [weak self] e in
             self?.lastSignal[chatId] = Date()
+            if firstSignal == nil { firstSignal = Date().timeIntervalSince(started) }
             switch e {
             case .session(let s):
                 self?.update(chatId) {
@@ -497,6 +505,9 @@ public final class Orchestrator {
             case .failure(let t): failure = t
             }
         }
+        let timing = TurnTiming(firstSignal: firstSignal, total: Date().timeIntervalSince(started), provider: profile.label)
+        update(chatId) { $0.lastTiming = timing }
+        logTiming(chatId, role: role.name, timing, ok: final != nil)
         finish(chatId, inputs: inputs, final: final, error: failure ?? exitError, profile: profile, turnReportedModel: turnReportedModel)
         if profile.provider == .codex { refreshQuotas() }
     }
@@ -557,7 +568,9 @@ public final class Orchestrator {
                 $0.inFlight = []
                 $0.status = $0.pending.isEmpty ? .done : .queued
             }
-            if delegated { callback(from: c, status: "xong", text: final, turnProfile: profile, turnModel: turnReportedModel) }
+            if delegated && !relayStep(c, final: final) {
+                callback(from: c, status: "xong", text: final, turnProfile: profile, turnModel: turnReportedModel)
+            }
         } else if let error, isLimitError(error) {
             team.limitedProviders.insert(profile.provider)
             team.limitedSince[profile.provider.rawValue] = Date()
@@ -585,6 +598,22 @@ public final class Orchestrator {
         }
         recordHealth()
         pump()
+    }
+
+    /// One CSV line per turn in `.agentteam/logs/turns.csv`, to see where time goes across many turns.
+    func logTiming(_ chatId: String, role: String, _ t: TurnTiming, ok: Bool) {
+        let file = paths.root.appendingPathComponent("logs/turns.csv")
+        try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let fmt = { (x: TimeInterval?) in x.map { String(format: "%.1f", $0) } ?? "" }
+        let line = [Date().formatted(.iso8601), chatId, role, t.provider, fmt(t.firstSignal), fmt(t.total), ok ? "ok" : "fail"]
+            .map { $0.replacingOccurrences(of: ",", with: ";") }.joined(separator: ",") + "\n"
+        if let h = try? FileHandle(forWritingTo: file) {
+            h.seekToEndOfFile()
+            h.write(Data(line.utf8))
+            try? h.close()
+        } else {
+            try? ("time,chat,role,profile,first_signal_s,total_s,result\n" + line).write(to: file, atomically: true, encoding: .utf8)
+        }
     }
 
     static let netBackoff: [TimeInterval] = [15, 30, 60, 120, 300, 600, 600, 600]
@@ -637,7 +666,59 @@ public final class Orchestrator {
         }
     }
 
+    func roleName(_ agentId: String) -> String { team.agent(agentId).flatMap { team.role($0.roleId) }?.name ?? "agent" }
+
+    /// Moves a relay one step after a turn finished. Returns true when the result was routed by the relay
+    /// (to the reviewer, back to the doer, or as the final outcome) instead of the normal callback.
+    func relayStep(_ c: Chat, final: String) -> Bool {
+        // The doer finished: its result goes to the reviewer.
+        if var r = c.relay, let reviewer = team.agent(r.reviewerAgent) {
+            let first = r.reviewerChat.flatMap(chat) == nil
+            let head = r.mode == .debate
+                ? "[Phản biện tự động · vòng \(r.round + 1)/\(r.maxRounds) · đề xuất của \(roleName(c.agentId)), chat \(c.id)]"
+                : "[Nghiệm thu tự động · vòng \(r.round + 1)/\(r.maxRounds) · báo cáo của \(roleName(c.agentId)), chat \(c.id)]"
+            let tailNote = r.mode == .debate
+                ? "Không còn vấn đề lớn thì ghi đúng câu \"\(Relay.agreed)\"."
+                : "Kết thúc bằng một dòng đúng mẫu: KẾT LUẬN: ĐẠT hoặc KẾT LUẬN: KHÔNG ĐẠT."
+            let text = head + "\n" + (first ? "Nhiệm vụ gốc:\n\(r.task)\n\n" : "")
+                + (r.mode == .debate ? "Đề xuất:\n" : "Báo cáo:\n") + final + "\n\n" + tailNote
+            if first {
+                r.reviewerChat = newChat(agentId: reviewer.id, title: (r.mode == .debate ? "Phản biện: " : "Nghiệm thu: ") + c.title, replyTo: c.id)
+            }
+            update(c.id) { $0.relay = r }
+            enqueue(r.reviewerChat!, text, kind: .task)
+            return true
+        }
+        // The reviewer finished: pass (or out of rounds) reports to the dispatcher, otherwise back to the doer.
+        guard let dId = c.replyTo, let d = chat(dId), var r = d.relay, r.reviewerChat == c.id else { return false }
+        r.round += 1
+        let passed = Relay.passed(final, mode: r.mode)
+        if passed || r.round >= r.maxRounds {
+            update(dId) { $0.relay = nil }
+            let status = r.mode == .debate
+                ? (passed ? "chốt sau \(r.round) vòng phản biện" : "hết \(r.maxRounds) vòng, critic còn phản bác")
+                : (passed ? "ĐẠT sau \(r.round) vòng nghiệm thu" : "KHÔNG ĐẠT sau \(r.maxRounds) vòng")
+            let doerFinal = chat(dId)?.messages.last(where: { $0.kind == .assistant })?.text ?? ""
+            callback(from: d, status: status, text: doerFinal + "\n\n--- \(roleName(c.agentId)), vòng cuối ---\n" + clip(final, 1500))
+            return true
+        }
+        update(dId) { $0.relay = r }
+        let note = r.mode == .debate
+            ? "Chấp nhận/bác từng điểm kèm lý do, rồi đưa lại bản đề xuất đầy đủ đã sửa."
+            : "Sửa đúng các lỗi trên, chạy lại kiểm tra rồi báo lại."
+        enqueue(dId, "[\(roleName(c.agentId)) · vòng \(r.round)/\(r.maxRounds)]\n\(final)\n\n\(note)", kind: .callback)
+        return true
+    }
+
     func callback(from c: Chat, status: String, text: String, turnProfile: Profile? = nil, turnModel: String? = nil) {
+        // An error ends a relay: a failing reviewer reports to the dispatcher, not to the doer.
+        if status == "lỗi" {
+            if c.relay != nil { update(c.id) { $0.relay = nil } }
+            if let t = c.replyTo, let d = chat(t), d.relay?.reviewerChat == c.id {
+                update(t) { $0.relay = nil }
+                return callback(from: d, status: "lỗi ở \(roleName(c.agentId)) khi rà soát", text: text)
+            }
+        }
         guard let target = c.replyTo, chat(target) != nil else { return }
         let role = team.agent(c.agentId).flatMap { team.role($0.roleId) }?.name ?? "agent"
         let effective = turnProfile ?? c.runningProfile ?? team.agent(c.agentId).flatMap(team.effectiveProfile)
@@ -860,6 +941,15 @@ public final class Orchestrator {
         guard !r.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return reject("Nội dung giao việc trống.")
         }
+        var relay: Relay?
+        if let rv = r.reviewer {
+            guard let reviewer = team.agent(rv) ?? team.agents.first(where: { $0.roleId == rv }), reviewer.id != agent.id else {
+                return reject("Không có agent/vai trò rà soát '\(rv)' (phải khác người làm). Xem: agentteam agents")
+            }
+            let mode = r.mode ?? .verify
+            let rounds = r.rounds ?? (mode == .debate ? team.debateRounds ?? 2 : 3)
+            relay = Relay(mode: mode, reviewerAgent: reviewer.id, maxRounds: min(max(rounds, 1), 10), task: r.body)
+        }
 
         let isTab = r.tab != nil
         let targetId: String
@@ -881,6 +971,7 @@ public final class Orchestrator {
 
         var updatedDiskChat = targetChat
         updatedDiskChat.replyTo = r.from
+        if let relay { updatedDiskChat.relay = relay }
         updatedDiskChat.receipts.append(DispatchReceipt(id: r.id, fingerprint: fp, date: Date()))
         updatedDiskChat.messages.append(Message(.task, taskText))
         updatedDiskChat.pending.append(Input(text: taskText, fromUser: false))

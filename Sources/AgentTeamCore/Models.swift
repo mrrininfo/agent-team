@@ -134,6 +134,54 @@ public struct DispatchReceipt: Codable, Hashable, Sendable {
     }
 }
 
+/// Automatic loop between a doer chat and a reviewer, run by the app instead of the dispatcher:
+/// debate (Planner ↔ Critic until "KHÔNG CÒN PHẢN BÁC LỚN") or verify (Worker → Testing until "KẾT LUẬN: ĐẠT").
+/// Only the final outcome goes back to the dispatcher, which saves its turns.
+public struct Relay: Codable, Hashable, Sendable {
+    public enum Mode: String, Codable, Sendable { case debate, verify }
+    public var mode: Mode
+    public var reviewerAgent: String
+    public var reviewerChat: String?
+    /// Reviewer verdicts received so far.
+    public var round = 0
+    public var maxRounds: Int
+    /// The original assignment, given to the reviewer with the first result.
+    public var task: String
+
+    public init(mode: Mode, reviewerAgent: String, maxRounds: Int, task: String) {
+        self.mode = mode
+        self.reviewerAgent = reviewerAgent
+        self.maxRounds = maxRounds
+        self.task = task
+    }
+
+    public static let agreed = "KHÔNG CÒN PHẢN BÁC LỚN"
+
+    /// Verify mode: the last "KẾT LUẬN:" line decides; without one, any "KHÔNG ĐẠT" fails.
+    public static func passed(_ text: String, mode: Mode) -> Bool {
+        let t = text.uppercased()
+        if mode == .debate { return t.contains(agreed) }
+        if let r = t.range(of: "KẾT LUẬN:", options: .backwards) {
+            let verdict = t[r.upperBound...].prefix(40)
+            return verdict.contains("ĐẠT") && !verdict.contains("KHÔNG")
+        }
+        return !t.contains("KHÔNG ĐẠT")
+    }
+}
+
+/// How long the last turn took: to the CLI's first output (start-up, session load, MCP) and in total.
+public struct TurnTiming: Codable, Hashable, Sendable {
+    public var firstSignal: TimeInterval?
+    public var total: TimeInterval
+    public var provider: String
+
+    public init(firstSignal: TimeInterval?, total: TimeInterval, provider: String) {
+        self.firstSignal = firstSignal
+        self.total = total
+        self.provider = provider
+    }
+}
+
 public struct Chat: Codable, Identifiable, Hashable, Sendable {
     public var id: String
     public var agentId: String
@@ -164,6 +212,8 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
     public var reportedModel: String?
     /// Provider rawValue that reported the model, ensuring model metadata is scoped to matching provider.
     public var reportedModelProvider: String?
+    public var relay: Relay?
+    public var lastTiming: TurnTiming?
 
     public init(id: String = shortId(), agentId: String, title: String, replyTo: String? = nil) {
         self.id = id
@@ -182,7 +232,7 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
         case id, agentId, title, replyTo, sessionId, sessionProfile
         case sessionAccess, sessionCanDispatch
         case messages, pending, inFlight, trail, status, autoTurns, tokens, activity, runningProfile
-        case receipts, reportedModel, reportedModelProvider
+        case receipts, reportedModel, reportedModelProvider, relay, lastTiming
     }
 
     public init(from decoder: Decoder) throws {
@@ -207,6 +257,8 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
         receipts = try container.decodeIfPresent([DispatchReceipt].self, forKey: .receipts) ?? []
         reportedModel = try container.decodeIfPresent(String.self, forKey: .reportedModel)
         reportedModelProvider = try container.decodeIfPresent(String.self, forKey: .reportedModelProvider)
+        relay = try container.decodeIfPresent(Relay.self, forKey: .relay)
+        lastTiming = try container.decodeIfPresent(TurnTiming.self, forKey: .lastTiming)
     }
 }
 
@@ -269,21 +321,21 @@ public struct Team: Codable, Sendable {
                 - Spec giao worker phải cụ thể: file cần sửa, việc từng bước, lệnh kiểm tra, tiêu chí đạt. Việc nhỏ thì tự viết spec ngắn;
                   việc lớn dùng spec của planner, gửi nguyên văn.
                 - Kiểm chứng được bằng test thì giao testing viết test thất bại trước, rồi mới giao worker làm cho test pass.
-                - Testing báo KHÔNG ĐẠT: gửi nguyên văn kết quả cho worker bằng --tab để sửa; quá 3 vòng thì giao planner xem lại cách làm
-                  hoặc báo người dùng.
+                - Giao việc ghi rõ phạm vi tối thiểu đủ đáp ứng yêu cầu; không thêm tính năng phụ người dùng không yêu cầu.
+                - Giao worker kèm `--verify testing`: Testing KHÔNG ĐẠT thì app tự gửi lại worker sửa (tối đa 3 vòng). Kết luận cuối
+                  vẫn KHÔNG ĐẠT thì giao planner xem lại cách làm hoặc báo người dùng.
                 - Worker hỏi lại vì mơ hồ: tự trả lời nếu đủ thông tin, không thì hỏi planner hoặc người dùng.
                 Việc quan trọng/nhiều rủi ro (kiến trúc, tiền, dữ liệu, chiến lược) hoặc người dùng yêu cầu thảo luận:
-                1. Giao planner phân tích và đề xuất phương án (ghi rõ giả định, rủi ro, tiêu chí đạt).
-                2. Giao critic phản biện phương án đó (gửi nguyên văn đề xuất). Critic không thấy cuộc trò chuyện này.
-                3. Chuyển phản biện cho planner bằng --tab để sửa, rồi gửi bản sửa lại cho critic bằng --tab; lặp tối đa số vòng ở mục
-                   "Thảo luận", dừng sớm khi critic ghi "KHÔNG CÒN PHẢN BÁC LỚN".
-                4. Tự chốt quyết định, ghi vào .agentteam/decisions/<chủ-đề>.md: phương án, lý do, rủi ro còn lại, tiêu chí nghiệm thu.
-                5. Giao worker thực hiện theo quyết định (kèm spec), rồi giao testing nghiệm thu theo đúng tiêu chí đó.
+                1. Giao planner phân tích và đề xuất phương án (giả định, rủi ro, tiêu chí đạt) kèm `--debate critic`: app tự chuyển
+                   qua lại planner ↔ critic theo số vòng ở mục "Thảo luận"; bạn chỉ nhận bản chốt kèm ý kiến cuối của critic.
+                2. Tự chốt quyết định, ghi vào .agentteam/decisions/<chủ-đề>.md: phương án, lý do, rủi ro còn lại, tiêu chí nghiệm thu.
+                3. Giao worker thực hiện theo quyết định (kèm spec) với `--verify testing`, đưa đúng tiêu chí nghiệm thu đó.
                 "Báo xong" chưa phải là đạt. Báo người dùng ngắn gọn, dễ hiểu: kết luận, bằng chứng, điểm còn tranh cãi.
                 """, access: .write, canDispatch: true,
                 fallbacks: [Profile(.claude, "opus"), Profile(.antigravity, "gemini-4-argon-high"), Profile(.antigravity, "claude-opus-5-5-high")]),
             Role(id: "planner", name: "Planner", contract: """
-                Phân tích và đề xuất. Đọc mã nguồn/tài liệu liên quan, đưa ra 1-3 phương án kèm đánh đổi và một khuyến nghị.
+                Phân tích và đề xuất. Đọc mã nguồn/tài liệu liên quan, đưa ra 1-3 phương án kèm đánh đổi và một khuyến nghị;
+                ưu tiên phương án đơn giản nhất đủ đáp ứng yêu cầu, không mở rộng phạm vi.
                 Bắt buộc có: giả định, rủi ro, cách kiểm chứng, tiêu chí đạt. Khi nhận phản biện: chấp nhận/bác từng điểm
                 kèm lý do, rồi đưa bản đề xuất đã sửa. Không sửa file dự án.
                 Khi khuyến nghị dẫn tới code, kèm mục "Spec cho worker": file cần sửa, hàm/kiểu dữ liệu, các bước nhỏ theo thứ tự,
@@ -314,9 +366,10 @@ public struct Team: Codable, Sendable {
                 fallbacks: [Profile(.antigravity, "gemini-3.8-flash-high"), Profile(.codex, "gpt-6-luna", effort: "medium")]),
         ]
         let agents = [
-            Agent(roleId: "lead", profile: Profile(.codex, "gpt-6.1-sol", effort: "high")),
+            // Lead mostly routes and Critic mostly checks: medium effort answers noticeably faster than high.
+            Agent(roleId: "lead", profile: Profile(.codex, "gpt-6.1-sol", effort: "medium")),
             Agent(roleId: "planner", profile: Profile(.claude, "opus")),
-            Agent(roleId: "critic", profile: Profile(.codex, "gpt-6.1-sol", effort: "high")),
+            Agent(roleId: "critic", profile: Profile(.codex, "gpt-6.1-sol", effort: "medium")),
             Agent(roleId: "worker", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
             Agent(roleId: "testing", profile: Profile(.claude, "sonnet")),
         ]
@@ -389,10 +442,10 @@ public enum TeamPreset: String, CaseIterable, Identifiable, Sendable {
                 Art director: nhận yêu cầu thiết kế, điều phối, chốt bản giao. Không tự viết prompt hay vẽ.
                 1. Yêu cầu thiếu thông tin quan trọng (mục đích, kích thước/tỉ lệ, chữ cần có, nơi đăng) thì hỏi người dùng tối đa 3 câu ngắn trước khi giao.
                 2. Giao brief viết brief + prompt (gửi nguyên văn yêu cầu người dùng).
-                3. Giao generator tạo ảnh theo prompt, lưu vào design/<tên-việc>/.
-                4. Giao reviewer chấm ảnh theo brief. KHÔNG ĐẠT: gửi prompt đã sửa của reviewer cho generator bằng --tab; tối đa 2 vòng.
-                5. Ảnh có chữ, hoặc cần kích thước/định dạng cụ thể: giao finisher hoàn thiện.
-                6. Báo người dùng: đường dẫn các file, khác nhau thế nào, khuyến nghị chọn bản nào.
+                3. Giao generator tạo ảnh theo prompt (lưu vào design/<tên-việc>/) kèm `--verify reviewer --rounds 2`, gửi kèm checklist của brief:
+                   reviewer chấm ảnh, KHÔNG ĐẠT thì app tự gửi prompt đã sửa lại cho generator.
+                4. Ảnh có chữ, hoặc cần kích thước/định dạng cụ thể: giao finisher hoàn thiện.
+                5. Báo người dùng: đường dẫn các file, khác nhau thế nào, khuyến nghị chọn bản nào.
                 Người dùng chọn/chê ảnh nào thì ghi ngắn gọn vào design/style-guide.md (thích gì, ghét gì, vì sao) để các lần sau làm đúng gu.
                 """, access: .write, canDispatch: true,
                 fallbacks: [Profile(.antigravity, "gemini-4-argon-high")]),

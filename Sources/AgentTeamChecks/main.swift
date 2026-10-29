@@ -714,7 +714,58 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// Relays: Planner ↔ Critic and Worker → Testing run without the dispatcher; it only gets the outcome.
+@MainActor func relayScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-relay-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var leadTurns = 0, critic = 0, testing = 0
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        let p = req.prompt
+        if p.contains("[Phản biện tự động") {
+            critic += 1
+            emit(.final(critic == 1 ? "Phản bác lớn: thiếu rollback." : "KHÔNG CÒN PHẢN BÁC LỚN"))
+        } else if p.contains("[Nghiệm thu tự động") {
+            testing += 1
+            emit(.final("Tiêu chí 1: KHÔNG ĐẠT\nKẾT LUẬN: KHÔNG ĐẠT"))
+        } else if p.contains("HỢP ĐỒNG VAI TRÒ") && p.contains("agentteam dispatch") || p.contains("[Kết quả từ") {
+            leadTurns += 1
+            emit(.final("lead ok"))
+        } else {
+            emit(.final("bản làm \(p.count)"))
+        }
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
+    let lead = o.team.agents.first { $0.roleId == "lead" }!
+    let leadChat = o.newChat(agentId: lead.id, title: "L")
+    func settle() async { for _ in 0..<400 where o.chats.contains(where: { [.running, .queued].contains($0.status) }) { try? await Task.sleep(nanoseconds: 5_000_000) } }
+    o.send("bắt đầu", to: leadChat)
+    await settle()
+    leadTurns = 0
+
+    _ = o.handle(DispatchRequest(from: leadChat, to: "planner", title: "PA", tab: nil, body: "Đề xuất cache", reviewer: "critic", mode: .debate, rounds: 3))
+    await settle()
+    let back = o.chat(leadChat)!.messages.last { $0.kind == .callback }?.text ?? ""
+    check(critic == 2 && leadTurns == 1 && back.contains("chốt sau 2 vòng") && back.contains("KHÔNG CÒN PHẢN BÁC LỚN"),
+          "debate loops planner↔critic without the lead and reports once")
+    let planner = o.chats.first { $0.title == "PA" }!
+    check(planner.relay == nil && o.chats.filter { $0.title.hasPrefix("Phản biện:") }.count == 1, "debate reuses one critic chat and ends")
+
+    o.send("tiếp", to: leadChat)  // a new lead turn, as in real use
+    await settle()
+    leadTurns = 0
+    _ = o.handle(DispatchRequest(from: leadChat, to: "worker", title: "W", tab: nil, body: "Sửa nút", reviewer: "testing", mode: .verify, rounds: 2))
+    await settle()
+    let verdict = o.chat(leadChat)!.messages.last { $0.kind == .callback }?.text ?? ""
+    check(testing == 2 && leadTurns == 1 && verdict.contains("KHÔNG ĐẠT sau 2 vòng"), "verify stops after max rounds and reports the failure once")
+    check(Relay.passed("…\nKẾT LUẬN: ĐẠT", mode: .verify) && !Relay.passed("KẾT LUẬN: KHÔNG ĐẠT", mode: .verify)
+          && Relay.passed("Mọi tiêu chí ĐẠT", mode: .verify), "verify verdict parsing")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await relayScenario()
 try await stallScenario()
 try await networkScenario()
 try await suspendScenario()

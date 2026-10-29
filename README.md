@@ -45,6 +45,12 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
    chạy lại một lần kèm cảnh báo, treo lần nữa thì báo lỗi về người giao. Lỗi mạng thì giữ nguyên việc,
    tự thử lại theo thời gian giãn dần hoặc ngay khi có mạng.
 
+10. **Tự rà soát không qua Lead**: `agentteam dispatch … --to planner --debate critic` (planner ↔ critic tự chuyển qua lại
+    tới khi critic ghi "KHÔNG CÒN PHẢN BÁC LỚN" hoặc hết số vòng) và `--to worker --verify testing` (Testing KHÔNG ĐẠT thì
+    tự gửi lại worker sửa, mặc định 3 vòng, đổi bằng `--rounds N`). Lead chỉ nhận kết quả cuối.
+11. **Đo thời gian**: đầu mỗi chat hiện thời gian tới tín hiệu đầu (khởi động CLI) và tổng của lượt cuối;
+    mọi lượt được ghi vào `.agentteam/logs/turns.csv`.
+
 ## Tiết kiệm token
 - Toolbar hiện tổng token, header của mỗi chat hiện token riêng (input không cache + output).
 - Resume session của provider, nên hợp đồng và roster chỉ gửi ở lượt đầu.
