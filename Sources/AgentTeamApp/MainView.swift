@@ -59,7 +59,10 @@ struct MainView: View {
                     } header: {
                         HStack {
                             VStack(alignment: .leading, spacing: 1) {
-                                Text("\(o.team.role(agent.roleId)?.name ?? agent.roleId) · \(agent.id)")
+                                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                                    Text(o.team.role(agent.roleId)?.name ?? agent.roleId).font(.title3.bold())
+                                    Text("· \(agent.id)")
+                                }
                                 Text(o.team.effectiveProfile(for: agent)?.label ?? "không khả dụng")
                                     .font(.caption2).foregroundStyle(o.team.effectiveProfile(for: agent) == agent.profile ? Color.secondary : .orange)
                             }
