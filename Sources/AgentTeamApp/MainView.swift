@@ -15,9 +15,18 @@ struct MainView: View {
     @State private var confirmDelete = false
     @State private var preview = PreviewState()
     @State private var nameDraft = ""
+    @State private var collapsed: Set<String> = []
     @FocusState private var editingName: Bool
 
     var displayName: String { o.team.name ?? o.paths.workspace.lastPathComponent }
+
+    /// Running, then waiting, then limited; otherwise the state of the chat with the latest message
+    /// (an old failed chat does not keep the group red).
+    func groupStatus(_ agentId: String) -> ChatStatus? {
+        let cs = o.chats(of: agentId)
+        for st in [ChatStatus.running, .queued, .limited] where cs.contains(where: { $0.status == st }) { return st }
+        return cs.max { ($0.messages.last?.date ?? .distantPast) < ($1.messages.last?.date ?? .distantPast) }?.status
+    }
 
     func saveName() {
         let n = nameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -46,7 +55,8 @@ struct MainView: View {
                 .padding(.vertical, 4)
                 NavigationLink(value: Selection.team) { Label("Team & Provider", systemImage: "person.3") }
                 ForEach(o.team.agents) { agent in
-                    Section {
+                    Section(isExpanded: Binding(get: { !collapsed.contains(agent.id) },
+                                                set: { if $0 { collapsed.remove(agent.id) } else { collapsed.insert(agent.id) } })) {
                         ForEach(o.chats(of: agent.id)) { c in
                             NavigationLink(value: Selection.chat(c.id)) {
                                 HStack(spacing: 6) {
@@ -63,8 +73,14 @@ struct MainView: View {
                                     Text(o.team.role(agent.roleId)?.name ?? agent.roleId).font(.title3.bold())
                                     Text("· \(agent.id)")
                                 }
+                                HStack(spacing: 5) {
+                                    // Collapsed: one dot for the group, the busiest state among its chats.
+                                    if collapsed.contains(agent.id), let st = groupStatus(agent.id) {
+                                        Circle().fill(st.color).frame(width: 7, height: 7)
+                                    }
                                 Text(o.team.effectiveProfile(for: agent)?.label ?? "không khả dụng")
                                     .font(.caption2).foregroundStyle(o.team.effectiveProfile(for: agent) == agent.profile ? Color.secondary : .orange)
+                                }
                             }
                             Spacer()
                             Button {

@@ -424,6 +424,10 @@ public final class Orchestrator {
         s += """
 
 
+        ## Phạm vi file
+        - Chỉ đọc/ghi trong workspace và đường dẫn được giao. Không quét thư mục cá nhân (`~`, Ảnh, Nhạc, Tải về, Desktop…):
+          máy chạy không người trông, mỗi lần đụng vào đó macOS sẽ dừng lại hỏi quyền.
+
         ## Báo cáo
         - Câu trả lời cuối của mỗi lượt được chuyển nguyên văn cho người giao việc: ngắn gọn, có bằng chứng (file:line, lệnh đã chạy, kết quả).
         - Việc dài: ghi tiến độ ngắn vào `.agentteam/notes/\(chat.id).md` (nếu được ghi) để có thể bàn giao khi bị ngắt.

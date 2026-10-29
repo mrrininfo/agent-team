@@ -26,5 +26,11 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
   <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 EOF
-codesign --force --deep -s - "$APP"
+# A fixed identity keeps macOS privacy choices across rebuilds (ad-hoc changes every build). Create once:
+# scripts/make-signing-cert.sh
+if security find-certificate -c "AgentTeam Local" ~/Library/Keychains/login.keychain-db >/dev/null 2>&1; then
+  codesign --force --deep -s "AgentTeam Local" "$APP"
+else
+  codesign --force --deep -s - "$APP"
+fi
 echo "Built $APP"
