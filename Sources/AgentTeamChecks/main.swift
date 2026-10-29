@@ -347,6 +347,13 @@ do {
     check(limitResetDate("usage limit reached", now: now) == nil, "no time named")
 }
 
+// Chats opened with + take their title from the first message.
+do {
+    check(Chat.title(from: "Nghiên cứu chiến lược pullback TSI trên XAUUSD khung M15 và đánh giá tỷ lệ thắng\nchi tiết") == "Nghiên cứu chiến lược pullback TSI trên XAUUSD…",
+          "long first line cut at a word")
+    check(Chat.title(from: "Check giá BTC") == "Check giá BTC" && Chat.title(from: "\n") == Chat.untitled, "short/empty titles")
+}
+
 // File links, attachments, network errors, sign-in status parsing.
 do {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-links-\(shortId())")

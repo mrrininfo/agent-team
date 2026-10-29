@@ -68,7 +68,7 @@ struct MainView: View {
                             }
                             Spacer()
                             Button {
-                                selection = .chat(o.newChat(agentId: agent.id, title: "Chat mới"))
+                                selection = .chat(o.newChat(agentId: agent.id, title: Chat.untitled))
                             } label: { Image(systemName: "plus") }
                             .buttonStyle(.borderless)
                             .help("Chat mới với agent này")

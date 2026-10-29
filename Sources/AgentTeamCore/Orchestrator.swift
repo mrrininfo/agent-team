@@ -155,6 +155,9 @@ public final class Orchestrator {
                 errors.append("Không đọc được \(file.lastPathComponent): \(error.localizedDescription)")
             }
         }
+        for i in loaded.indices where loaded[i].title == Chat.untitled {
+            if let first = loaded[i].messages.first(where: { $0.kind == .user }) { loaded[i].title = Chat.title(from: first.text) }
+        }
         chats = loaded.sorted { ($0.messages.first?.date ?? .distantPast) < ($1.messages.first?.date ?? .distantPast) }
         failedChatFiles = failedFiles
         loadErrors = errors
@@ -263,7 +266,10 @@ public final class Orchestrator {
     }
 
     public func send(_ text: String, to chatId: String) {
-        update(chatId) { $0.autoTurns = 0 }
+        update(chatId) {
+            $0.autoTurns = 0
+            if $0.title == Chat.untitled { $0.title = Chat.title(from: text) }
+        }
         enqueue(chatId, text, kind: .user)
     }
 

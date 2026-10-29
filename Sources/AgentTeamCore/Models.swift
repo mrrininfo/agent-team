@@ -222,6 +222,17 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
         self.replyTo = replyTo
     }
 
+    /// Title of a chat opened with +; replaced by the start of its first message.
+    public static let untitled = "Chat mới"
+
+    /// First line of a message, cut at a word near 50 characters, as a chat title.
+    public static func title(from text: String) -> String {
+        let line = text.split(whereSeparator: \.isNewline).first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+        guard line.count > 50 else { return line.isEmpty ? untitled : line }
+        let cut = line.prefix(50)
+        return String(cut.lastIndex(of: " ").map { cut[..<$0] } ?? cut) + "…"
+    }
+
     public func verifiedModel(for profile: Profile?) -> String? {
         guard let m = reportedModel, let p = profile, sessionProfile == p,
               reportedModelProvider == p.provider.rawValue else { return nil }
