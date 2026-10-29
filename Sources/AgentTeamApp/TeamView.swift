@@ -57,6 +57,15 @@ struct TeamView: View {
 
     var providers: some View {
         Section("Provider (tắt provider hết hạn → agent tự dùng fallback của vai trò)") {
+            if let bad = o.team.badModels, !bad.isEmpty {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                    Text("Model bị CLI từ chối, đang bỏ qua: \(bad.sorted().map { $0.replacingOccurrences(of: "|", with: " · ") }.joined(separator: ", ")). Đổi tên model ở vị trí/fallback rồi bỏ đánh dấu.")
+                        .font(.caption)
+                    Spacer()
+                    Button("Bỏ đánh dấu model lỗi") { o.team.badModels = nil; o.retryLimited() }
+                }
+            }
             ForEach(Provider.allCases) { p in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {

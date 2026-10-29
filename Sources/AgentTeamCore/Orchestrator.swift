@@ -611,6 +611,18 @@ public final class Orchestrator {
                 $0.messages.append(Message(.system, "\(profile.provider.title) bị limit: \(clip(error, 300))\n"
                     + (canContinue ? "Tự động chuyển sang provider dự phòng kèm gói bàn giao. " : "Hết fallback; việc được giữ và tự chạy lại. ") + wait))
             }
+        } else if let error, isModelError(error) {
+            team.badModels = (team.badModels ?? []).union([profile.modelKey])
+            let next = team.agent(c.agentId).flatMap(team.effectiveProfile)
+            update(chatId) {
+                $0.pending = $0.inFlight + $0.pending
+                $0.inFlight = []
+                $0.status = next == nil ? .failed : .queued
+                $0.messages.append(Message(.system, "Model \(profile.label) không dùng được (\(clip(error, 200))). "
+                    + (next.map { "Chuyển sang \($0.label) kèm gói bàn giao. " } ?? "Không còn fallback; việc được giữ. ")
+                    + "Đổi tên model trong Team & Provider rồi bấm \"Bỏ đánh dấu model lỗi\"."))
+            }
+            if next == nil, delegated { callback(from: c, status: "lỗi", text: "Model \(profile.label) không còn dùng được và không còn fallback.", turnProfile: profile) }
         } else if let error, isNetworkError(error) || !online, (netRetries[chatId] ?? 0) < Self.netBackoff.count {
             update(chatId) { $0.pending = $0.inFlight + $0.pending; $0.inFlight = [] }
             return waitForNetwork(chatId, reason: clip(error, 200))

@@ -135,6 +135,7 @@ struct MainView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { QuotaBar(o: o) }
         }
         .environment(preview)
+        .task { if Accounts.shared.status.isEmpty { await Accounts.shared.refresh(o.team.binaryPaths) } }
         .inspector(isPresented: $preview.shown) {
             PreviewPane(root: o.paths.workspace)
                 .environment(preview)

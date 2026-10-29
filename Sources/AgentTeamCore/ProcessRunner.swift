@@ -333,10 +333,13 @@ public final class ProcessRunner {
 public struct AccountStatus: Sendable, Equatable {
     public var ok: Bool?
     public var detail: String
+    /// Models the CLI listed while being checked (only agy lists them); empty means use the built-in suggestions.
+    public var models: [String]
 
-    public init(ok: Bool?, detail: String) {
+    public init(ok: Bool?, detail: String, models: [String] = []) {
         self.ok = ok
         self.detail = detail
+        self.models = models
     }
 }
 
@@ -372,8 +375,14 @@ extension Provider {
                 && !output.localizedCaseInsensitiveContains("not logged in")
             return AccountStatus(ok: logged, detail: logged ? output.trimmingCharacters(in: .whitespacesAndNewlines) : "chưa đăng nhập")
         case .antigravity:
-            let logged = exit == 0 && output.contains("gemini")
-            return AccountStatus(ok: logged, detail: logged ? "đã đăng nhập" : "chưa đăng nhập hoặc không kết nối được: " + tail(output, 160))
+            // `agy models`: one "<slug>\t<display name>" line per model.
+            let models = output.split(separator: "\n").compactMap { line -> String? in
+                let slug = line.split(separator: "\t").first.map(String.init) ?? ""
+                return line.contains("\t") && slug.range(of: #"^[a-z0-9][a-z0-9.\-]+$"#, options: .regularExpression) != nil ? slug : nil
+            }
+            let logged = exit == 0 && !models.isEmpty
+            return AccountStatus(ok: logged, detail: logged ? "đã đăng nhập · \(models.count) model" : "chưa đăng nhập hoặc không kết nối được: " + tail(output, 160),
+                                 models: models)
         }
     }
 }

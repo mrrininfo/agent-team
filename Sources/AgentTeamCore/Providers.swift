@@ -252,3 +252,13 @@ public func limitResetDate(_ text: String, now: Date = Date()) -> Date? {
     }
     return cal.nextDate(after: now, matching: want, matchingPolicy: .nextTime)
 }
+
+/// The configured model does not exist (renamed, retired) or this account cannot use it: other models still work,
+/// so only that provider+model is skipped.
+public func isModelError(_ text: String) -> Bool {
+    let t = text.lowercased()
+    if ["model_not_found", "unknown model", "invalid model", "unsupported model", "no such model", "model not found",
+        "issue with the selected model", "model is not supported", "model not supported"].contains(where: { t.contains($0) }) { return true }
+    // Codex: "The model `x` does not exist or you do not have access to it."
+    return t.range(of: #"model[^\n]{0,60}(does not exist|not exist|is not available|not available|not found)"#, options: .regularExpression) != nil
+}

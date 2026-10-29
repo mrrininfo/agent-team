@@ -52,6 +52,9 @@ public struct Profile: Codable, Hashable, Sendable {
         self.effort = effort
     }
 
+    /// Provider + model, the unit a "model not found" error applies to.
+    public var modelKey: String { "\(provider.rawValue)|\(model)" }
+
     public var label: String {
         [provider.title, model.isEmpty ? "mặc định" : model, effort].filter { !$0.isEmpty }.joined(separator: " · ")
     }
@@ -283,6 +286,8 @@ public struct Team: Codable, Sendable {
     /// Provider rawValue → when its limit resets, if known (from the error text or the quota bar); retried then
     /// instead of every `limitCooldownMinutes`. Optional so older team.json files decode.
     public var limitedUntil: [String: Date]?
+    /// `Profile.modelKey`s the CLI rejected as missing/unavailable; skipped like a limited provider until cleared.
+    public var badModels: Set<String>?
     public var limitCooldownMinutes = 30
     /// Provider rawValue → absolute binary path; empty means auto-detect from the login shell PATH.
     public var binaryPaths: [String: String] = [:]
@@ -309,7 +314,7 @@ public struct Team: Codable, Sendable {
     public func agent(_ id: String) -> Agent? { agents.first { $0.id == id } }
 
     public func usable(_ p: Profile) -> Bool {
-        !disabledProviders.contains(p.provider) && !limitedProviders.contains(p.provider)
+        !disabledProviders.contains(p.provider) && !limitedProviders.contains(p.provider) && !(badModels ?? []).contains(p.modelKey)
     }
 
     public func effectiveProfile(for agent: Agent) -> Profile? {

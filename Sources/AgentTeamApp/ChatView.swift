@@ -327,6 +327,12 @@ struct MessageRow: View {
 struct ProfileEditor: View {
     @Binding var profile: Profile
 
+    /// Models the CLI itself reported (Antigravity), so new ones appear without an app update; else the built-in list.
+    func models(_ p: Provider) -> [String] {
+        let live = Accounts.shared.status[p]?.models ?? []
+        return live.isEmpty ? p.suggestedModels : live
+    }
+
     var body: some View {
         HStack(spacing: 4) {
             Picker("", selection: $profile.provider) {
@@ -334,12 +340,12 @@ struct ProfileEditor: View {
             }
             .labelsHidden().frame(width: 125)
             .onChange(of: profile.provider) { _, p in
-                if !p.suggestedModels.contains(profile.model) { profile.model = p.suggestedModels.first ?? "" }
+                if !models(p).contains(profile.model) { profile.model = models(p).first ?? "" }
                 if !p.efforts.contains(profile.effort) { profile.effort = "" }
             }
             TextField("", text: $profile.model, prompt: Text("model")).labelsHidden().frame(width: 160)
             Menu {
-                ForEach(profile.provider.suggestedModels, id: \.self) { m in Button(m) { profile.model = m } }
+                ForEach(models(profile.provider), id: \.self) { m in Button(m) { profile.model = m } }
             } label: { Image(systemName: "chevron.down") }
             .menuStyle(.borderlessButton).menuIndicator(.hidden).frame(width: 22)
             Picker("", selection: $profile.effort) {

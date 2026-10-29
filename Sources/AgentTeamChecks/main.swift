@@ -362,6 +362,19 @@ do {
     check(Chat.title(from: "Check giá BTC") == "Check giá BTC" && Chat.title(from: "\n") == Chat.untitled, "short/empty titles")
 }
 
+// Retired/unknown models: detected, skipped for that provider+model only; agy lists live models.
+do {
+    check(isModelError("The model `gpt-5-old` does not exist or you do not have access to it.")
+          && isModelError("There's an issue with the selected model (claude-x). It may not exist or you may not have access to it.")
+          && !isModelError("You've hit your 5-hour limit") && !isModelError("Added a model field to the schema"), "model errors detected")
+    var t = Team.starter()
+    t.badModels = [Profile(.antigravity, "gemini-3.8-flash-high").modelKey]
+    check(t.agents.first { $0.roleId == "worker" }.flatMap(t.effectiveProfile) == Profile(.antigravity, "claude-sonnet-5-5-high"),
+          "bad model skipped, same provider's other model still used")
+    let st = Provider.antigravity.parseStatus(exit: 0, output: "Fetching available models...\ngemini-9-ultra-high\tGemini 9 Ultra (High)\ngemini-4-argon-high\tGemini 4 Argon (High)\n")
+    check(st.ok == true && st.models == ["gemini-9-ultra-high", "gemini-4-argon-high"], "agy model list parsed")
+}
+
 // File links, attachments, network errors, sign-in status parsing.
 do {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-links-\(shortId())")
@@ -386,7 +399,8 @@ do {
     check(stub.terminationStatus == 64, "dispatchers cannot launch provider CLIs directly")
     check(Provider.claude.parseStatus(exit: 0, output: #"{"loggedIn": true, "email": "a@b.c"}"#) == AccountStatus(ok: true, detail: "a@b.c"), "claude status parsed")
     check(Provider.codex.parseStatus(exit: 1, output: "Not logged in").ok == false, "codex signed out")
-    check(Provider.antigravity.parseStatus(exit: 0, output: "gemini-4-argon-high\tGemini").ok == true, "agy signed in")
+    check(Provider.antigravity.parseStatus(exit: 0, output: "gemini-4-argon-high\tGemini").ok == true
+          && Provider.antigravity.parseStatus(exit: 1, output: "error: not logged in").ok == false, "agy signed in/out")
     try? FileManager.default.removeItem(at: root)
 }
 
@@ -833,7 +847,30 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// A retired model fails over to the next profile and keeps the work.
+@MainActor func badModelScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-model-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var used: [String] = []
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        used.append(req.profile.model)
+        if req.profile.model == "gone-model" { return "exit 1: The model `gone-model` does not exist or you do not have access to it." }
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    let w = o.team.agents.first { $0.roleId == "worker" }!
+    o.team.agents[o.team.agents.firstIndex { $0.id == w.id }!].profile = Profile(.antigravity, "gone-model")
+    let c = o.newChat(agentId: w.id, title: "w")
+    o.send("làm", to: c)
+    for _ in 0..<200 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(o.chat(c)?.status == .done && used == ["gone-model", "claude-sonnet-5-5-high"] && o.team.badModels?.count == 1,
+          "retired model fails over to the next fallback")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await badModelScenario()
 try await limitUntilScenario()
 try await relayScenario()
 try await stallScenario()
