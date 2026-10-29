@@ -9,11 +9,11 @@ public enum Handoff {
         Không làm lại phần đã xong; kiểm tra trạng thái file thực tế trước khi sửa. Tiếp tục đúng điểm bị ngắt rồi báo cáo theo hợp đồng vai trò.
         """
         if let first = chat.messages.first(where: { [.user, .task, .handoff].contains($0.kind) }) {
-            s += "\n\n## Nhiệm vụ gốc\n" + clip(first.text, 3000)
+            s += "\n\n## Nhiệm vụ gốc\n" + first.text
         }
         let open = inputs.map(\.text).filter { $0 != chat.messages.first?.text }
         if !open.isEmpty {
-            s += "\n\n## Yêu cầu chưa hoàn thành\n" + clip(open.joined(separator: "\n\n---\n\n"), 3000)
+            s += "\n\n## Yêu cầu chưa hoàn thành\n" + open.joined(separator: "\n\n---\n\n")
         }
         let answers = chat.messages.filter { $0.kind == .assistant }.suffix(2)
         if !answers.isEmpty {

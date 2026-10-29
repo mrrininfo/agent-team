@@ -54,6 +54,13 @@ struct ChatView: View {
             HStack(spacing: 10) {
                 Text("\(o.team.role(agent.roleId)?.name ?? agent.roleId) · \(agent.id) · chat \(c.id) · \(c.tokens.formatted()) token")
                     .font(.caption.monospaced()).foregroundStyle(.secondary)
+                let curProfile = c.runningProfile ?? o.team.effectiveProfile(for: agent)
+                if let rep = c.verifiedModel(for: curProfile) {
+                    Text("model: \(rep) (đã xác minh)").font(.caption).foregroundStyle(.blue)
+                } else {
+                    let cfg = curProfile?.model ?? agent.profile.model
+                    Text("model: \(cfg) (cấu hình)").font(.caption).foregroundStyle(.secondary)
+                }
                 if let r = c.runningProfile ?? o.team.effectiveProfile(for: agent), r != agent.profile {
                     Text("→ đang dùng \(r.label)").font(.caption).foregroundStyle(.orange)
                 }

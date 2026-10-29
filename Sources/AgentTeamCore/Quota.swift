@@ -18,11 +18,36 @@ public struct ProviderQuota: Codable, Hashable, Sendable {
     public var updated: Date
 }
 
+public enum QuotaStatus: Equatable, Sendable {
+    case reading
+    case noBinary
+    case disabled
+    case error(message: String, at: Date)
+    case available(ProviderQuota)
+}
+
 public enum Quota {
+    public static var fileOverride: URL?
+    public static var workDirOverride: URL?
+    public static var codexSessionsOverride: URL?
+    public static var codexHomeOverride: URL?
+
     /// Account-wide, so shared by all projects and kept across restarts.
     public static var file: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        if let override = fileOverride { return override }
+        if let env = ProcessInfo.processInfo.environment["AGENTTEAM_QUOTA_FILE"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AgentTeam/quota.json")
+    }
+
+    public static var workDir: URL {
+        if let override = workDirOverride { return override }
+        if let env = ProcessInfo.processInfo.environment["AGENTTEAM_AGY_USAGE_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        return file.deletingLastPathComponent().appendingPathComponent("agy-usage")
     }
 
     public static func load() -> [String: ProviderQuota] {
@@ -69,8 +94,18 @@ public enum Quota {
     }
 
     /// Latest Codex limits from its newest session file; costs no tokens.
-    public static func readCodex(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> ProviderQuota? {
-        let root = home.appendingPathComponent(".codex/sessions")
+    public static func readCodex(home: URL? = nil) -> ProviderQuota? {
+        let root: URL
+        if let home {
+            root = home.appendingPathComponent(".codex/sessions")
+        } else if let sessionsOverride = codexSessionsOverride {
+            root = sessionsOverride
+        } else if let envSessions = ProcessInfo.processInfo.environment["AGENTTEAM_CODEX_SESSIONS_DIR"], !envSessions.isEmpty {
+            root = URL(fileURLWithPath: envSessions)
+        } else {
+            let h = codexHomeOverride ?? ProcessInfo.processInfo.environment["AGENTTEAM_CODEX_HOME"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser
+            root = h.appendingPathComponent(".codex/sessions")
+        }
         guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { return nil }
         var newest: (URL, Date)?
         for case let url as URL in e where url.pathExtension == "jsonl" {
@@ -91,10 +126,32 @@ public enum Quota {
 // MARK: - Antigravity
 
 extension Quota {
-    /// agy has no headless quota output: its `/usage` panel exists only in the interactive TUI.
-    /// shortcut: drives that TUI through a pseudo-terminal and scrapes the text; breaks if the panel layout
-    /// changes. Upgrade when agy offers a machine-readable usage command.
-    public static func probeAntigravity(binary: String, workDir: URL) -> String? {
+    /// Cleans up direct children spawned by the probe wrapper process.
+    nonisolated static func cleanProbeChildren(parentPid: Int32) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        p.arguments = ["-P", String(parentPid)]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        let out = String(decoding: data, as: UTF8.self)
+        for line in out.split(separator: "\n") {
+            if let childPid = Int32(line.trimmingCharacters(in: .whitespaces)), childPid > 1 {
+                kill(childPid, SIGTERM)
+                usleep(100_000)
+                if kill(childPid, 0) == 0 {
+                    kill(childPid, SIGKILL)
+                }
+            }
+        }
+    }
+
+    /// Drives the Antigravity interactive TUI with a finite deadline, reader timeout,
+    /// no blind Enter keystrokes, and robust child cleanup.
+    public static func probeAntigravity(binary: String, workDir: URL, timeoutSeconds: Double = 25) -> String? {
         try? FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/script")
@@ -105,8 +162,10 @@ extension Quota {
         p.standardOutput = out
         p.standardError = out
         guard (try? p.run()) != nil else { return nil }
+        let pid = p.processIdentifier
+
+        // Removed blind Enter; start straight into /usage
         let keys: [(Double, String)] = [
-            (5, "\r"),                       // accepts the one-time "trust this folder" prompt; ignored otherwise
             (2, "/usage"), (1.5, "\r"),
             (7, "\u{1b}[6~"), (1, "\u{1b}[6~"), (1, "\u{1b}[6~"), (1, "\u{1b}[6~"),   // page through all groups
             (1, "\u{1b}"), (1, "/exit"), (1, "\r"),
@@ -116,12 +175,40 @@ extension Quota {
             for (delay, k) in keys {
                 Thread.sleep(forTimeInterval: delay)
                 guard p.isRunning else { return }
-                w.write(Data(k.utf8))
+                try? w.write(contentsOf: Data(k.utf8))
             }
-            Thread.sleep(forTimeInterval: 5)
-            if p.isRunning { p.terminate() }
         }
-        let data = out.fileHandleForReading.readDataToEndOfFile()
+
+        var data = Data()
+        let group = DispatchGroup()
+        group.enter()
+        DispatchQueue.global().async {
+            data = out.fileHandleForReading.readDataToEndOfFile()
+            group.leave()
+        }
+
+        // Wait with finite deadline
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while p.isRunning && Date() < deadline {
+            usleep(100_000)
+        }
+
+        if p.isRunning {
+            p.terminate()
+            var exited = false
+            for _ in 0..<20 {
+                usleep(100_000)
+                if !p.isRunning { exited = true; break }
+            }
+            if !exited {
+                kill(pid, SIGKILL)
+            }
+        }
+
+        cleanProbeChildren(parentPid: pid)
+        try? inp.fileHandleForWriting.close()
+
+        _ = group.wait(timeout: .now() + 2)
         p.waitUntilExit()
         return String(decoding: data, as: UTF8.self)
     }

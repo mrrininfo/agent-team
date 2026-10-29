@@ -53,10 +53,33 @@ struct MainView: View {
             }
             .navigationSplitViewColumnWidth(min: 230, ideal: 270)
         } detail: {
-            Group {
-                switch selection {
-                case .chat(let id): ChatView(o: o, chatId: id).id(id)
-                default: TeamView(o: o)
+            VStack(spacing: 0) {
+                if let err = o.lastIOError {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.yellow)
+                        Text(err).font(.caption).lineLimit(2)
+                        Spacer()
+                        Button("Đóng") { o.clearLastIOError() }
+                            .buttonStyle(.borderless)
+                    }
+                    .padding(8)
+                    .background(Color.red.opacity(0.15))
+                }
+                if !o.loadErrors.isEmpty {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+                        Text("Có \(o.loadErrors.count) tệp chat không đọc được (giữ nguyên tệp gốc): \(o.failedChatFiles.joined(separator: ", "))")
+                            .font(.caption).lineLimit(2)
+                        Spacer()
+                    }
+                    .padding(8)
+                    .background(Color.orange.opacity(0.15))
+                }
+                Group {
+                    switch selection {
+                    case .chat(let id): ChatView(o: o, chatId: id).id(id)
+                    default: TeamView(o: o)
+                    }
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { QuotaBar(o: o) }

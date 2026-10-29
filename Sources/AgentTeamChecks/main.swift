@@ -7,10 +7,11 @@ func check(_ ok: Bool, _ what: String, line: Int = #line) {
     if !ok { failures += 1; print("FAIL line \(line): \(what)") }
 }
 
-// Parsers
+// Parsers & Limit Detection
 do {
     var p = OutputParser(.claude)
     check(p.feed(#"{"type":"system","subtype":"init","session_id":"s1"}"#) == [.session("s1")], "claude init")
+    check(p.feed(#"{"type":"system","subtype":"init","session_id":"s1","model":"claude-3-5-sonnet-20241022"}"#) == [.session("s1"), .modelMetadata("claude-3-5-sonnet-20241022")], "claude init with model metadata")
     check(p.feed(#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}"#) == [.progress("🔧 Bash ls")], "claude tool")
     check(p.feed(#"{"type":"result","subtype":"success","is_error":false,"result":"OK","session_id":"s1"}"#) == [.session("s1"), .final("OK")], "claude result")
     check(p.feed(#"{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached"}"#) == [.failure("Claude AI usage limit reached")], "claude error")
@@ -26,8 +27,34 @@ do {
     check(a.feed(#"{"event":"result","result":{"conversation_id":"g1","status":"SUCCESS","response":"Hello"}}"#) == [.session("g1"), .final("Hello")], "agy result")
     check(a.feed("not json") == [], "garbage ignored")
 
-    check(isLimitError("You've hit your usage limit.") && isLimitError("RESOURCE_EXHAUSTED") && !isLimitError("file not found"), "limit detection")
+    // R2: Positive contextual limit detection
+    check(isLimitError("Claude AI usage limit reached"), "claude usage limit")
+    check(isLimitError("You've hit your usage limit."), "codex usage limit")
+    check(isLimitError("RESOURCE_EXHAUSTED"), "agy resource exhausted")
+    check(isLimitError("HTTP 429 Too Many Requests"), "http 429")
+    check(isLimitError("status: 429"), "status 429")
+    check(isLimitError("error: 429"), "error: 429")
+    check(isLimitError(#"API Error: 429 {"type":"rate_limit_error"}"#), "api error 429")
+    check(isLimitError("insufficient_quota"), "insufficient quota")
+    check(isLimitError("quota exceeded for model"), "quota exceeded")
+
+    // R2: Negative cases (must NOT match bare 429 or bare quota)
+    check(!isLimitError("see main.swift line 429 for details"), "negative line 429 details")
+    check(!isLimitError("exit 1: processed 429 files"), "negative processed 429 files")
+    check(!isLimitError("File.swift:429: error: index out of range"), "negative line 429")
+    check(!isLimitError("/var/log/app/429/output.log"), "negative path 429")
+    check(!isLimitError("Request ID: req_429184"), "negative request id 429")
+    check(!isLimitError("The user has a quota of 10 pull requests per day."), "negative agent text quota")
+    check(!isLimitError("exit 1: command not found"), "negative general error")
 }
+
+// Isolate Quota and Team template tests so they never touch ~/Library/Application Support/AgentTeam
+let tempQuotaDir = FileManager.default.temporaryDirectory.appendingPathComponent("quota-test-\(shortId())")
+try FileManager.default.createDirectory(at: tempQuotaDir, withIntermediateDirectories: true)
+Quota.fileOverride = tempQuotaDir.appendingPathComponent("quota.json")
+Quota.workDirOverride = tempQuotaDir.appendingPathComponent("agy-usage")
+Quota.codexSessionsOverride = tempQuotaDir.appendingPathComponent("codex_sessions")
+Team.templateFileOverride = tempQuotaDir.appendingPathComponent("template.json")
 
 // Built-in template: Planner and Critic on different providers, also after Claude is switched off.
 do {
@@ -46,6 +73,26 @@ do {
     var json = try JSONSerialization.jsonObject(with: jsonEncoder.encode(Team.starter())) as! [String: Any]
     json.removeValue(forKey: "debateRounds")
     check((try? jsonDecoder.decode(Team.self, from: JSONSerialization.data(withJSONObject: json))) != nil, "old team.json decodes")
+}
+
+// Verified model helper tests
+do {
+    let claudeProf = Profile(.claude, "sonnet")
+    let codexProf = Profile(.codex, "gpt-6.1-sol")
+    var c = Chat(agentId: "w", title: "test")
+    c.sessionProfile = claudeProf
+    c.reportedModel = "claude-3-7-sonnet"
+    c.reportedModelProvider = "claude"
+
+    // cùng profile: trả model
+    check(c.verifiedModel(for: claudeProf) == "claude-3-7-sonnet", "verifiedModel matching profile returns model")
+
+    // phiên Claude, profile hiện tại Codex: nil
+    check(c.verifiedModel(for: codexProf) == nil, "verifiedModel mismatched profile returns nil")
+
+    // reportedModelProvider bằng nil: nil
+    c.reportedModelProvider = nil
+    check(c.verifiedModel(for: claudeProf) == nil, "verifiedModel nil provider returns nil")
 }
 
 // Quota parsing
@@ -79,7 +126,7 @@ do {
     check(w[4].resetsAt == now.addingTimeInterval(166 * 3600 + 10 * 60), "agy argon reset")
 }
 
-// Orphan cleanup only touches our own provider CLIs and clears the record.
+// D2: Process ownership verification & orphan cleanup
 do {
     let ws = FileManager.default.temporaryDirectory.appendingPathComponent("orph-\(shortId())")
     let paths = TeamPaths(workspace: ws)
@@ -88,22 +135,180 @@ do {
     sleeper.executableURL = URL(fileURLWithPath: "/bin/sleep")
     sleeper.arguments = ["30"]
     try sleeper.run()
-    try JSONEncoder().encode(["c1": sleeper.processIdentifier]).write(to: paths.runningFile)
-    check(ProcessRunner.stopOrphans(paths) == 0 && sleeper.isRunning, "non-provider pid left alone")
-    check(!FileManager.default.fileExists(atPath: paths.runningFile.path), "running record cleared")
-    sleeper.terminate()
+
+    // 1. Legacy schema test: [String: Int32] -> do NOT signal sleeper, mark unverified
+    try JSONEncoder().encode(["c_legacy": sleeper.processIdentifier]).write(to: paths.runningFile)
+    let resLegacy = ProcessRunner.stopOrphans(paths)
+    check(resLegacy.stopped == 0 && sleeper.isRunning, "legacy schema leaves process alone without blind signal")
+    check(resLegacy.legacyChatIds.contains("c_legacy") && resLegacy.unverifiedChatIds.contains("c_legacy"), "legacy schema marks chat legacy and unverified")
+
+    // 2. New schema with non-matching startTime / binary -> do NOT kill sleeper (recycled PID protection)
+    let fakeRec = RunningProcessRecord(pid: sleeper.processIdentifier, startTimeSec: 100, startTimeUsec: 200, binary: "/usr/bin/other")
+    try JSONEncoder().encode(["c_mismatch": fakeRec]).write(to: paths.runningFile)
+    let resMismatch = ProcessRunner.stopOrphans(paths)
+    check(resMismatch.stopped == 0 && sleeper.isRunning, "recycled/mismatched PID is NOT signaled")
+
+    // 3. New schema with exact verified ownership -> kills sleeper safely
+    let start = ProcessRunner.processStartTime(pid: sleeper.processIdentifier)!
+    let realRec = RunningProcessRecord(pid: sleeper.processIdentifier, startTimeSec: start.0, startTimeUsec: start.1, binary: "/bin/sleep")
+    try JSONEncoder().encode(["c_verified": realRec]).write(to: paths.runningFile)
+    let resVerified = ProcessRunner.stopOrphans(paths)
+    check(resVerified.stopped == 1 && !sleeper.isRunning, "verified owned process is stopped safely")
+    check(!FileManager.default.fileExists(atPath: paths.runningFile.path), "running record cleared on exit")
+
+    // 4. Symlink ownership (e.g. ~/.local/bin/claude -> /.../versions/...): verified and stopped
+    let link = ws.appendingPathComponent("fakeclaude")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: URL(fileURLWithPath: "/bin/sleep"))
+    let symProc = Process()
+    symProc.executableURL = link
+    symProc.arguments = ["30"]
+    try symProc.run()
+    let symStart = ProcessRunner.processStartTime(pid: symProc.processIdentifier)!
+    let symRec = RunningProcessRecord(pid: symProc.processIdentifier, startTimeSec: symStart.0, startTimeUsec: symStart.1, binary: link.path)
+    try JSONEncoder().encode(["c_sym": symRec]).write(to: paths.runningFile)
+    let resSym = ProcessRunner.stopOrphans(paths)
+    check(resSym.stopped == 1 && !symProc.isRunning, "orphan launched via symlink is verified and stopped")
+
+    // 5. Alive process with same startTime but path mismatch -> do NOT kill, mark unverified (blocks resume)
+    let pOther = Process()
+    pOther.executableURL = URL(fileURLWithPath: "/bin/sleep")
+    pOther.arguments = ["30"]
+    try pOther.run()
+    let otherStart = ProcessRunner.processStartTime(pid: pOther.processIdentifier)!
+    let otherRec = RunningProcessRecord(pid: pOther.processIdentifier, startTimeSec: otherStart.0, startTimeUsec: otherStart.1, binary: "/usr/bin/unverified_other")
+    try JSONEncoder().encode(["c_unverified": otherRec]).write(to: paths.runningFile)
+    let resOther = ProcessRunner.stopOrphans(paths)
+    check(resOther.unverifiableChatIds.contains("c_unverified") && resOther.unverifiedChatIds.contains("c_unverified") && pOther.isRunning, "alive process with unverifiable path is NOT killed and marked unverifiable")
+    pOther.terminate()
+
     try? FileManager.default.removeItem(at: ws)
 }
 
-// Arguments
+// D2: Inter-process lock via flock on .agentteam/lock & suspend holding lock
 do {
-    let r = TurnRequest(prompt: "x", profile: Profile(.codex, "gpt-6.1-sol", effort: "high"), sessionId: "t1", access: .write)
+    let wsLock = FileManager.default.temporaryDirectory.appendingPathComponent("locktest-\(shortId())")
+    try FileManager.default.createDirectory(at: wsLock, withIntermediateDirectories: true)
+    let o1 = try Orchestrator(workspace: wsLock) { _, _, _, _ in nil }
+
+    var secondLocked = false
+    do {
+        _ = try Orchestrator(workspace: wsLock) { _, _, _, _ in nil }
+    } catch OrchestratorError.workspaceLocked {
+        secondLocked = true
+    } catch {
+        check(false, "unexpected error: \(error)")
+    }
+    check(secondLocked, "second Orchestrator on same workspace is blocked by flock")
+
+    o1.releaseLock()
+    let o3 = try? Orchestrator(workspace: wsLock) { _, _, _, _ in nil }
+    check(o3 != nil, "subsequent Orchestrator acquires lock after release")
+    o3?.releaseLock()
+
+    // T1: Suspend with active runner holds lock until child terminates
+    var childRunning = true
+    let oT1 = try Orchestrator(workspace: wsLock) { _, _, _, _ in
+        while childRunning {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return "exit 15: terminated"
+    }
+    let c = oT1.newChat(agentId: oT1.team.agents[0].id, title: "job")
+    oT1.send("task", to: c)
+    try? await Task.sleep(nanoseconds: 100_000_000)
+    oT1.suspend()
+
+    var secondAcquired = false
+    do {
+        _ = try Orchestrator(workspace: wsLock) { _, _, _, _ in nil }
+        secondAcquired = true
+    } catch OrchestratorError.workspaceLocked {
+        secondAcquired = false
+    } catch {}
+    check(!secondAcquired, "T1: second instance blocked by lock while suspended runner child is still running")
+
+    childRunning = false
+    try? await Task.sleep(nanoseconds: 200_000_000)
+    oT1.releaseLock()
+
+    try? FileManager.default.removeItem(at: wsLock)
+}
+
+// R5 Arguments & Sandbox matrix
+do {
+    let r = TurnRequest(prompt: "x", profile: Profile(.codex, "gpt-6.1-sol", effort: "high"), sessionId: "t1", access: .write, canDispatch: false)
     let a = Provider.codex.arguments(r)
     check(a.prefix(2) == ["exec", "--json"] && a.suffix(3) == ["resume", "t1", "-"] && a.contains("model_reasoning_effort=high"), "codex args \(a)")
+    check(a.contains("workspace-write"), "codex write access uses workspace-write")
+
+    // Codex read-only without dispatch -> read-only sandbox
+    let codexRO = Provider.codex.arguments(TurnRequest(prompt: "x", profile: Profile(.codex), sessionId: nil, access: .readOnly, canDispatch: false))
+    check(codexRO.contains("read-only"), "codex read-only without dispatch uses sandbox read-only")
+
+    // Codex read-only with dispatch -> workspace-write sandbox (agentteam needs write)
+    let codexRODispatch = Provider.codex.arguments(TurnRequest(prompt: "x", profile: Profile(.codex), sessionId: nil, access: .readOnly, canDispatch: true))
+    check(codexRODispatch.contains("workspace-write"), "codex read-only with dispatch uses workspace-write")
+
     let g = Provider.antigravity.arguments(TurnRequest(prompt: "hi", profile: Profile(.antigravity), sessionId: "g1", access: .readOnly))
     check(g[0...1] == ["-p", "hi"] && g.suffix(2) == ["--conversation", "g1"], "agy args \(g)")
-    let cl = Provider.claude.arguments(TurnRequest(prompt: "x", profile: Profile(.claude, "opus"), sessionId: nil, access: .readOnly))
-    check(cl.contains("--allowedTools") && !cl.contains("--dangerously-skip-permissions"), "claude read-only args")
+
+    // Claude read-only without dispatch -> no Bash tool
+    let clRO = Provider.claude.arguments(TurnRequest(prompt: "x", profile: Profile(.claude, "opus"), sessionId: nil, access: .readOnly, canDispatch: false))
+    check(clRO.contains("--allowedTools") && !clRO.joined().contains("Bash"), "claude read-only without dispatch omits Bash tool")
+
+    // Claude read-only with dispatch -> includes Bash agentteam
+    let clRODispatch = Provider.claude.arguments(TurnRequest(prompt: "x", profile: Profile(.claude, "opus"), sessionId: nil, access: .readOnly, canDispatch: true))
+    check(clRODispatch.contains("--allowedTools") && clRODispatch.joined().contains("Bash(agentteam"), "claude read-only with dispatch allows Bash agentteam")
+}
+
+// Schema backward compatibility & unreadable chat reporting (R3 / I/O)
+do {
+    let wsSchema = FileManager.default.temporaryDirectory.appendingPathComponent("schema-\(shortId())")
+    let paths = TeamPaths(workspace: wsSchema)
+    try paths.ensure()
+
+    let oldChatJson = """
+    {
+        "id": "old1",
+        "agentId": "a1",
+        "title": "Old Chat",
+        "status": "idle",
+        "messages": [{"id": "\(UUID().uuidString)", "kind": "user", "text": "hello", "date": "2026-10-29T00:00:00Z"}],
+        "pending": [],
+        "inFlight": [],
+        "trail": []
+    }
+    """
+    try oldChatJson.data(using: .utf8)!.write(to: paths.chatFile("old1"))
+    try "corrupt json data".data(using: .utf8)!.write(to: paths.chatFile("corrupt"))
+
+    let oSchema = try Orchestrator(workspace: wsSchema) { _, _, _, _ in nil }
+    check(oSchema.chats.contains(where: { $0.id == "old1" }), "old schema chat decodes cleanly")
+    check(oSchema.chat("old1")?.receipts.isEmpty == true, "old schema defaults receipts to empty")
+    check(oSchema.chat("old1")?.sessionAccess == nil, "old schema defaults sessionAccess to nil")
+    check(oSchema.failedChatFiles.contains("corrupt.json"), "corrupt chat recorded in failedChatFiles")
+    check(!oSchema.loadErrors.isEmpty, "corrupt chat has visible error message")
+
+    // Health file check
+    check(FileManager.default.fileExists(atPath: paths.healthFile.path), "health.json written on init")
+    if let hData = try? Data(contentsOf: paths.healthFile),
+       let health = try? jsonDecoder.decode(HealthRecord.self, from: hData) {
+        check(health.loadedChats == 1 && health.failedChatFiles == 1, "health.json reports correct loaded and failed counts")
+    } else {
+        check(false, "health.json unreadable")
+    }
+
+    oSchema.releaseLock()
+    try? FileManager.default.removeItem(at: wsSchema)
+}
+
+// R1: Handoff full text preservation (>12k input, >4k callback)
+do {
+    let longInput = String(repeating: "A", count: 15_000)
+    var dummyChat = Chat(agentId: "w", title: "Test")
+    dummyChat.messages.append(Message(.user, longInput))
+    let pkg = Handoff.package(chat: dummyChat, role: nil, reason: "test", inputs: [Input(text: longInput, fromUser: true)], notes: nil, gitStatus: nil)
+    check(pkg.contains(longInput), "input over 12k chars is NOT clipped in handoff package")
 }
 
 // Orchestrator flow with a fake runner
@@ -137,17 +342,87 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     await settle()
     check(prompts.first?.1.contains("HỢP ĐỒNG VAI TRÒ") == true && prompts.first?.1.contains("agentteam dispatch") == true, "lead gets preamble with dispatch help")
 
-    // Lead dispatches to worker; result must come back to the lead chat.
-    let ack = o.handle(DispatchRequest(from: leadChat, to: "worker", title: "Fix Save", tab: nil, body: "Sửa nút Lưu"))
+    // R3: Dispatch with atomic receipt and replay testing
+    let reqId = "req-test-\(shortId())"
+    let req = DispatchRequest(id: reqId, from: leadChat, to: "worker", title: "Fix Save", tab: nil, body: "Sửa nút Lưu")
+    let ack = o.handle(req)
     check(ack.disposition != "rejected" && ack.chatId != nil, "dispatch accepted \(ack)")
+    let wChatId = ack.chatId!
+
+    // Verify receipt was committed to disk chat
+    let wChat = o.chat(wChatId)!
+    check(wChat.receipts.contains(where: { $0.id == reqId }), "dispatch receipt recorded in chat")
+
+    // Replay identical dispatch: must return identical ACK without duplicating task
+    let preReplayCount = o.chat(wChatId)!.messages.count
+    let ackReplay = o.handle(req)
+    check(ackReplay.disposition == ack.disposition && ackReplay.chatId == wChatId, "replay identical request returns existing ACK")
+    check(o.chat(wChatId)!.messages.count == preReplayCount, "replay did not duplicate task in chat")
+
+    // ID conflict on different body: rejected
+    let confReq = DispatchRequest(id: reqId, from: leadChat, to: "worker", title: "Fix Save", tab: nil, body: "DIFFERENT CONTENT")
+    let ackConflict = o.handle(confReq)
+    check(ackConflict.disposition == "rejected" && ackConflict.reason?.contains("Xung đột") == true, "conflict on different fingerprint rejected")
+
+    // Replay original request after conflict still returns valid original ACK, and disk ACK was NOT overwritten
+    let ackAfterConflict = o.handle(req)
+    check(ackAfterConflict.disposition == ack.disposition && ackAfterConflict.chatId == wChatId, "original request replay after conflict returns valid original ACK")
+    let ackDisk = (try? JSONDecoder().decode(DispatchAck.self, from: Data(contentsOf: o.paths.ackFile(reqId))))?.disposition
+    check(ackDisk == ack.disposition, "conflict did not overwrite original ACK on disk")
+
+    // R3a/R3b: Inbox-level tests
+    func putInbox(_ r: DispatchRequest) throws { try JSONEncoder().encode(r).write(to: o.paths.inbox.appendingPathComponent("\(r.id).json")) }
+    func ackDiskOf(_ id: String) -> DispatchAck? { (try? Data(contentsOf: o.paths.ackFile(id))).flatMap { try? JSONDecoder().decode(DispatchAck.self, from: $0) } }
+
+    // R3a legit then conflict through inbox
+    let i1Id = "inbox-i1-\(shortId())"
+    try putInbox(DispatchRequest(id: i1Id, from: leadChat, to: "worker", title: "t", tab: nil, body: "A"))
+    o.processInbox()
+    let origAck = ackDiskOf(i1Id)
+    try putInbox(DispatchRequest(id: i1Id, from: leadChat, to: "worker", title: "t", tab: nil, body: "OTHER"))
+    o.processInbox()
+    let afterAck = ackDiskOf(i1Id)
+    check(afterAck?.disposition == origAck?.disposition && afterAck?.chatId == origAck?.chatId && origAck?.disposition != "rejected", "R3a inbox conflict does not overwrite original ACK")
+
+    // R3b receipt present, ACK missing, conflict first, then original
+    let i2Id = "inbox-i2-\(shortId())"
+    try putInbox(DispatchRequest(id: i2Id, from: leadChat, to: "worker", title: "t", tab: nil, body: "A2"))
+    o.processInbox()
+    try? FileManager.default.removeItem(at: o.paths.ackFile(i2Id))
+    try putInbox(DispatchRequest(id: i2Id, from: leadChat, to: "worker", title: "t", tab: nil, body: "CONFLICT"))
+    o.processInbox()
+    try putInbox(DispatchRequest(id: i2Id, from: leadChat, to: "worker", title: "t", tab: nil, body: "A2"))
+    o.processInbox()
+    let finAck = ackDiskOf(i2Id)
+    check(finAck?.disposition != "rejected" && finAck?.chatId != nil, "R3b receipt w/o ACK: conflict must not poison; original replay gets accepted ACK")
+
+    // Transient I/O commit error does not persist rejected ACK; retry succeeds
+    chmod(o.paths.chats.path, 0o500)
+    let ioReqId = "req-io-\(shortId())"
+    let ioReq = DispatchRequest(id: ioReqId, from: leadChat, to: "worker", title: "IO Test", tab: nil, body: "Transient IO")
+    let ioAck1 = o.handle(ioReq)
+    check(ioAck1.disposition == "rejected" && ioAck1.reason?.contains("Lỗi I/O") == true, "transient commit error rejected")
+    check(!FileManager.default.fileExists(atPath: o.paths.ackFile(ioReqId).path), "transient I/O error did not persist rejected ACK to disk")
+    check(o.lastIOError != nil, "lastIOError recorded on I/O failure")
+    chmod(o.paths.chats.path, 0o700)
+    let ioAck2 = o.handle(ioReq)
+    check(ioAck2.disposition != "rejected", "retry same id after I/O recovery succeeds")
+
     await settle()
-    let wChat = o.chat(ack.chatId!)!
-    check(wChat.agentId == worker.id && wChat.status == .done, "worker done")
-    check(o.chat(leadChat)!.messages.contains { $0.kind == .callback && $0.text.contains("Kết quả từ Worker") }, "callback in lead chat")
+    check(o.chat(wChatId)!.agentId == worker.id && o.chat(wChatId)!.status == .done, "worker done")
+    check(o.chat(leadChat)!.messages.contains { $0.kind == .callback && $0.text.contains("Kết quả từ Worker") && $0.text.contains("profile:") }, "callback in lead chat with profile")
     check(prompts.last?.1.contains("HỢP ĐỒNG VAI TRÒ") == false, "lead resumed without preamble (token saving)")
 
+    // Deleted chat after ACK: returns inconsistency rejection
+    let delReq = DispatchRequest(id: "req-del", from: leadChat, to: "worker", title: "To Del", tab: nil, body: "Delete soon")
+    let ackToDel = o.handle(delReq)
+    check(ackToDel.chatId != nil, "dispatch for delete test")
+    o.deleteChat(ackToDel.chatId!)
+    let ackAfterDel = o.handle(delReq)
+    check(ackAfterDel.disposition == "rejected" && ackAfterDel.reason?.contains("Bất nhất") == true, "deleted chat after ACK reports inconsistency")
+
     // Workers cannot dispatch; unknown targets are rejected.
-    check(o.handle(DispatchRequest(from: wChat.id, to: "lead", title: "x", tab: nil, body: "x")).disposition == "rejected", "worker cannot dispatch")
+    check(o.handle(DispatchRequest(from: wChatId, to: "lead", title: "x", tab: nil, body: "x")).disposition == "rejected", "worker cannot dispatch")
     check(o.handle(DispatchRequest(from: leadChat, to: "nobody", title: "x", tab: nil, body: "x")).disposition == "rejected", "unknown target")
 
     // Limit on Claude → auto failover to Codex with a handoff package; provider marked limited.
@@ -165,7 +440,7 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
 
     // Manual transfer moves replyTo and work into the new chat.
     let w2 = o.newChat(agentId: worker.id, title: "Tiếp quản")
-    o.transfer(from: wChat.id, to: w2)
+    o.transfer(from: wChatId, to: w2)
     await settle()
     check(o.chat(w2)!.messages.first?.kind == .handoff && o.chat(w2)!.replyTo == leadChat, "manual transfer")
 
@@ -173,11 +448,53 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     o.replaceProvider(.claude, with: Profile(.antigravity, "gemini-3.8-flash-high"))
     check(!o.team.agents.contains { $0.profile.provider == .claude }, "replace provider")
 
-    // Restart recovery: a chat left running is re-queued.
+    // R1: Prompt exceeding Antigravity argv limit is blocked before inFlight and kept in pending
+    o.replaceProvider(.codex, with: Profile(.antigravity, "gemini-3.8-flash-high"))
+    let hugePrompt = String(repeating: "Z", count: Provider.maxAntigravityPromptBytes + 500)
+    o.send(hugePrompt, to: w2)
+    await settle()
+    check(o.chat(w2)?.status == .failed, "huge prompt exceeds agy argv limit and fails")
+    check(o.chat(w2)?.pending.first?.text == hugePrompt, "overflowed prompt stays in pending")
+    check(o.chat(w2)!.messages.contains { $0.kind == .system && $0.text.contains("ngưỡng argv") }, "system message explains argv overflow")
+
+    // Clear pending for w2 before restart test
+    o.deleteChat(w2)
+
+    // Restart recovery: release lock from running instance to simulate termination before reload
+    let w3 = o.newChat(agentId: worker.id, title: "Dở việc")
     o.team.maxConcurrent = 0
-    o.send("việc dở", to: w2)
+    o.send("việc dở", to: w3)
+    o.releaseLock()
     let reloaded = try Orchestrator(workspace: ws) { _, _, _, _ in nil }
-    check(reloaded.chat(w2)?.status == .queued && reloaded.chat(w2)?.pending.isEmpty == false, "restart keeps queued work")
+    check(reloaded.chat(w3)?.status == .queued && reloaded.chat(w3)?.pending.isEmpty == false, "restart keeps queued work")
+
+    // D3 backoff progression: 10m -> 20m -> 40m -> 60m
+    check(reloaded.agyBackoffMinutes == 10, "initial backoff is 10 minutes")
+    reloaded.agyFailCount = 1
+    check(reloaded.agyBackoffMinutes == 10, "1st fail backoff is 10 minutes")
+    reloaded.agyFailCount = 2
+    check(reloaded.agyBackoffMinutes == 20, "2nd fail backoff is 20 minutes")
+    reloaded.agyFailCount = 3
+    check(reloaded.agyBackoffMinutes == 40, "3rd fail backoff is 40 minutes")
+    reloaded.agyFailCount = 4
+    check(reloaded.agyBackoffMinutes == 60, "4th fail backoff is 60 minutes")
+    reloaded.agyFailCount = 0
+
+    // QuotaStatus .error after failure
+    let fakeAgy = ws.appendingPathComponent("fake_agy.sh")
+    try "#!/bin/sh\nexit 1\n".write(to: fakeAgy, atomically: true, encoding: .utf8)
+    chmod(fakeAgy.path, 0o755)
+    reloaded.antigravityBinary = { fakeAgy.path }
+    reloaded.refreshAntigravityQuota(force: true)
+    for _ in 0..<50 where Orchestrator.antigravityProbeRunning { try? await Task.sleep(nanoseconds: 50_000_000) }
+    let st = reloaded.quotaStatus(for: .antigravity)
+    if case .error = st {
+        check(true, "quotaStatus is .error after probe failure")
+    } else {
+        check(false, "quotaStatus expected .error but got \(st)")
+    }
+
+    reloaded.releaseLock()
 }
 
 // Suspending a workspace (switch/close) requeues running work instead of losing it.
@@ -197,10 +514,110 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     for _ in 0..<100 where o.chat(c)?.status == .running { try? await Task.sleep(nanoseconds: 5_000_000) }
     check(o.chat(c)?.status == .queued && o.chat(c)?.pending.first?.text == "việc dài", "suspend requeues running turn")
     check(!o.chat(c)!.messages.contains { $0.kind == .system }, "suspend adds no error message")
+    o.releaseLock()
+}
+
+// R1: First turn limit error triggers handoff package on fallback
+@MainActor func firstTurnLimitScenario() async throws {
+    let wsFirst = ws.appendingPathComponent("firstlim")
+    try FileManager.default.createDirectory(at: wsFirst, withIntermediateDirectories: true)
+    var promptsSeen: [String] = []
+    let o = try Orchestrator(workspace: wsFirst) { _, req, _, emit in
+        promptsSeen.append(req.prompt)
+        if req.profile.provider == .claude {
+            emit(.failure("Claude AI usage limit reached"))
+            return nil
+        }
+        emit(.session("sess-fallback"))
+        emit(.final("Done on fallback"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    o.team = Team.starter()
+    // Make sure planner has claude profile
+    let plannerAgent = o.team.agents.first { $0.roleId == "planner" }!
+    let pChat = o.newChat(agentId: plannerAgent.id, title: "First Turn Limit Chat")
+
+    func settle() async { for _ in 0..<200 where o.chats.contains(where: { [.running, .queued].contains($0.status) }) { try? await Task.sleep(nanoseconds: 5_000_000) } }
+
+    o.send("First turn prompt", to: pChat)
+    await settle()
+
+    check(o.chat(pChat)?.status == .done, "chat finished on fallback provider after first turn limit")
+    check(promptsSeen.count >= 2, "claude was called then fallback was called")
+    check(promptsSeen.last?.contains("BÀN GIAO CÔNG VIỆC") == true, "first turn limit triggered handoff package")
+    o.releaseLock()
+}
+
+// R5: Session resume requires exact match of (profile, access, canDispatch)
+@MainActor func resumeTupleScenario() async throws {
+    let wsResume = ws.appendingPathComponent("resume-tuple")
+    try FileManager.default.createDirectory(at: wsResume, withIntermediateDirectories: true)
+    var sessionPrompts: [String] = []
+    var requestedSessions: [String?] = []
+    let o = try Orchestrator(workspace: wsResume) { _, req, _, emit in
+        sessionPrompts.append(req.prompt)
+        requestedSessions.append(req.sessionId)
+        emit(.session("sess-123"))
+        emit(.final("Response"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    o.team = Team.starter()
+    let lead = o.team.agents.first { $0.roleId == "lead" }!
+    let c = o.newChat(agentId: lead.id, title: "Resume Test")
+
+    func settle() async { for _ in 0..<200 where o.chats.contains(where: { [.running, .queued].contains($0.status) }) { try? await Task.sleep(nanoseconds: 5_000_000) } }
+
+    // Turn 1: Fresh turn, no session yet
+    o.send("Turn 1", to: c)
+    await settle()
+    check(requestedSessions.first! == nil, "first turn has no sessionId")
+    check(o.chat(c)?.sessionId == "sess-123", "session recorded")
+    check(o.chat(c)?.sessionAccess == .write, "sessionAccess recorded")
+    check(o.chat(c)?.sessionCanDispatch == true, "sessionCanDispatch recorded")
+
+    // Turn 2: Same profile, access, canDispatch -> Resumed!
+    o.send("Turn 2", to: c)
+    await settle()
+    check(requestedSessions.last! == "sess-123", "matching tuple resumes session")
+
+    // Turn 3: Modify role access (simulate privilege change) -> tuple mismatch -> fresh session with handoff package!
+    let leadRoleIdx = o.team.roles.firstIndex { $0.id == "lead" }!
+    o.team.roles[leadRoleIdx].access = .readOnly
+    o.send("Turn 3", to: c)
+    await settle()
+    check(requestedSessions.last! == nil, "access change prevented session resume")
+    check(sessionPrompts.last?.contains("BÀN GIAO CÔNG VIỆC") == true, "access change generated handoff package")
+
+    o.releaseLock()
+}
+
+// Install-check hook keeps pump, polling and probe disabled
+@MainActor func installCheckScenario() async throws {
+    let wsCheck = ws.appendingPathComponent("install-check")
+    try FileManager.default.createDirectory(at: wsCheck, withIntermediateDirectories: true)
+    var ranTurn = false
+    let o = try Orchestrator(workspace: wsCheck, isInstallCheck: true) { _, _, _, _ in
+        ranTurn = true
+        return nil
+    }
+    let c = o.newChat(agentId: o.team.agents[0].id, title: "Test")
+    o.send("Should not run during install check", to: c)
+    o.pump()
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    check(!ranTurn, "pump is disabled during install check")
+    check(o.chat(c)?.status == .queued, "turn remains queued during install check")
+    check(FileManager.default.fileExists(atPath: o.paths.healthFile.path), "health.json is generated during install check")
+    o.releaseLock()
 }
 
 try await scenario()
 try await suspendScenario()
+try await firstTurnLimitScenario()
+try await resumeTupleScenario()
+try await installCheckScenario()
 try? FileManager.default.removeItem(at: ws)
+
 print(failures == 0 ? "All checks passed" : "\(failures) check(s) failed")
 exit(failures == 0 ? 0 : 1)

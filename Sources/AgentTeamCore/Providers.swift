@@ -5,12 +5,14 @@ public struct TurnRequest: Sendable {
     public var profile: Profile
     public var sessionId: String?
     public var access: Access
+    public var canDispatch: Bool
 
-    public init(prompt: String, profile: Profile, sessionId: String?, access: Access) {
+    public init(prompt: String, profile: Profile, sessionId: String?, access: Access, canDispatch: Bool = false) {
         self.prompt = prompt
         self.profile = profile
         self.sessionId = sessionId
         self.access = access
+        self.canDispatch = canDispatch
     }
 }
 
@@ -23,6 +25,8 @@ public enum RunEvent: Equatable, Sendable {
     case usage(Int)
     /// Subscription limit windows reported by the CLI.
     case quota([QuotaWindow])
+    /// Exact model metadata reported by the CLI runtime.
+    case modelMetadata(String)
 }
 
 private func int(_ d: [String: Any]?, _ k: String) -> Int { (d?[k] as? NSNumber)?.intValue ?? 0 }
@@ -31,6 +35,10 @@ extension Provider {
     /// claude and codex read the prompt from stdin (no argv size limit); agy takes it as the -p value.
     public var promptViaStdin: Bool { self != .antigravity }
 
+    /// Conservative prompt limit in bytes when passing via argv (-p) on Antigravity;
+    /// Claude and Codex use stdin and do not have this restriction.
+    public static let maxAntigravityPromptBytes = 131_072 // shortcut: conservative argv limit for Antigravity until R4b measurement
+
     public func arguments(_ r: TurnRequest) -> [String] {
         let p = r.profile
         switch self {
@@ -38,13 +46,18 @@ extension Provider {
             var a = ["-p", "--output-format", "stream-json", "--verbose"]
             if !p.model.isEmpty { a += ["--model", p.model] }
             if let s = r.sessionId { a += ["--resume", s] }
-            a += r.access == .write
-                ? ["--dangerously-skip-permissions"]
-                : ["--allowedTools", "Read,Grep,Glob,LS,WebFetch,WebSearch,Bash(agentteam:*),Bash(agentteam *)"]
+            if r.access == .write {
+                a += ["--dangerously-skip-permissions"]
+            } else {
+                let tools = r.canDispatch
+                    ? "Read,Grep,Glob,LS,WebFetch,WebSearch,Bash(agentteam:*),Bash(agentteam *)"
+                    : "Read,Grep,Glob,LS,WebFetch,WebSearch"
+                a += ["--allowedTools", tools]
+            }
             return a
         case .codex:
-            // workspace-write even for read-only roles: `agentteam` must write the inbox inside the workspace.
-            var a = ["exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write"]
+            let sandbox = (r.access == .readOnly && !r.canDispatch) ? "read-only" : "workspace-write"
+            var a = ["exec", "--json", "--skip-git-repo-check", "--sandbox", sandbox]
             if !p.model.isEmpty { a += ["-m", p.model] }
             if !p.effort.isEmpty { a += ["-c", "model_reasoning_effort=\(p.effort)"] }
             if let s = r.sessionId { a += ["resume", s] }
@@ -79,7 +92,10 @@ public struct OutputParser {
     mutating func claude(_ o: [String: Any]) -> [RunEvent] {
         switch o["type"] as? String {
         case "system":
-            return (o["session_id"] as? String).map { [.session($0)] } ?? []
+            var ev: [RunEvent] = []
+            if let s = o["session_id"] as? String { ev.append(.session(s)) }
+            if let m = o["model"] as? String, !m.isEmpty { ev.append(.modelMetadata(m)) }
+            return ev
         case "rate_limit_event":
             let w = Quota.claude(o["rate_limit_info"] as? [String: Any] ?? [:])
             return w.isEmpty ? [] : [.quota(w)]
@@ -179,9 +195,24 @@ public struct OutputParser {
     }
 }
 
-/// shortcut: keyword match on the error text; providers do not document a stable limit error code yet.
+/// Contextual match on the error text; avoids false positives from bare keywords or line numbers.
 public func isLimitError(_ text: String) -> Bool {
     let t = text.lowercased()
-    return ["usage limit", "rate limit", "rate_limit", "quota", "resource_exhausted", "limit reached",
-            "hit your limit", "too many requests", "429", "credit balance", "out of credits"].contains { t.contains($0) }
+    let phrases = [
+        "usage limit", "rate limit", "rate_limit", "resource_exhausted",
+        "limit reached", "hit your limit", "too many requests", "credit balance",
+        "out of credits", "quota exceeded", "exceeded your quota",
+        "exceeded your current quota", "over quota", "quota limit", "insufficient_quota",
+        "rate_limit_error"
+    ]
+    if phrases.contains(where: { t.contains($0) }) { return true }
+
+    let patterns429 = [
+        "http 429", "http status 429", "error 429", "error: 429", "status: 429", "status 429",
+        "code: 429", "code 429", "429 too many", "429 rate limit", "429 quota", "api error: 429"
+    ]
+    if patterns429.contains(where: { t.contains($0) }) { return true }
+    if t.hasPrefix("429 too many") || t.hasPrefix("429 rate limit") || t.hasPrefix("429:") || t.hasPrefix("429 -") { return true }
+
+    return false
 }

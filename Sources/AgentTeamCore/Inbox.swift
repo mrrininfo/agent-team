@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Written by `agentteam dispatch` into `.agentteam/inbox/`, consumed by the app.
@@ -17,6 +18,12 @@ public struct DispatchRequest: Codable, Sendable {
         self.tab = tab
         self.body = body
     }
+
+    /// Stable SHA-256 fingerprint of the request payload to detect replays vs conflicting payloads.
+    public var fingerprint: String {
+        let raw = "\(from)|\(to)|\(title ?? "")|\(tab ?? "")|\(body)"
+        return SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 public struct DispatchAck: Codable, Sendable {
@@ -24,12 +31,14 @@ public struct DispatchAck: Codable, Sendable {
     public var disposition: String  // queued | started | rejected
     public var chatId: String?
     public var reason: String?
+    public var fingerprint: String?
 
-    public init(id: String, disposition: String, chatId: String? = nil, reason: String? = nil) {
+    public init(id: String, disposition: String, chatId: String? = nil, reason: String? = nil, fingerprint: String? = nil) {
         self.id = id
         self.disposition = disposition
         self.chatId = chatId
         self.reason = reason
+        self.fingerprint = fingerprint
     }
 }
 
@@ -45,12 +54,18 @@ public struct TeamPaths: Sendable {
     public var acks: URL { inbox.appendingPathComponent("acks", isDirectory: true) }
     public var chats: URL { root.appendingPathComponent("chats", isDirectory: true) }
     public var notes: URL { root.appendingPathComponent("notes", isDirectory: true) }
-    /// chatId → pid of the provider process running that chat's turn; lets a relaunch stop orphans.
+    public var lockFile: URL { root.appendingPathComponent("lock") }
+    public var healthFile: URL { root.appendingPathComponent("health.json") }
+    /// chatId → process info running that chat's turn; lets a relaunch stop orphans safely.
     public var runningFile: URL { root.appendingPathComponent("running.json") }
 
     public func chatFile(_ id: String) -> URL { chats.appendingPathComponent("\(id).json") }
     public func noteFile(_ id: String) -> URL { notes.appendingPathComponent("\(id).md") }
     public func ackFile(_ id: String) -> URL { acks.appendingPathComponent("\(id).json") }
+
+    public func ensureLockDirectory() throws {
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    }
 
     public func ensure() throws {
         for d in [inbox, acks, chats, notes] {

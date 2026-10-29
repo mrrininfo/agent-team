@@ -111,10 +111,27 @@ public struct Message: Codable, Identifiable, Hashable, Sendable {
 public struct Input: Codable, Hashable, Sendable {
     public var text: String
     public var fromUser: Bool
+
+    public init(text: String, fromUser: Bool) {
+        self.text = text
+        self.fromUser = fromUser
+    }
 }
 
 public enum ChatStatus: String, Codable, Sendable {
     case idle, queued, running, done, failed, limited
+}
+
+public struct DispatchReceipt: Codable, Hashable, Sendable {
+    public var id: String
+    public var fingerprint: String
+    public var date: Date
+
+    public init(id: String, fingerprint: String, date: Date = Date()) {
+        self.id = id
+        self.fingerprint = fingerprint
+        self.date = date
+    }
 }
 
 public struct Chat: Codable, Identifiable, Hashable, Sendable {
@@ -126,6 +143,10 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
     public var sessionId: String?
     /// Profile that owns `sessionId`; a different effective profile cannot resume it.
     public var sessionProfile: Profile?
+    /// Access mode under which `sessionId` was established; changing access requires a fresh session.
+    public var sessionAccess: Access?
+    /// Whether `sessionId` had dispatch capability; changing capability requires a fresh session.
+    public var sessionCanDispatch: Bool?
     public var messages: [Message] = []
     public var pending: [Input] = []
     public var inFlight: [Input] = []
@@ -137,12 +158,55 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
     public var tokens = 0
     public var activity = ""
     public var runningProfile: Profile?
+    /// Atomic dispatch receipts recorded to enforce idempotency and prevent duplicate enqueues.
+    public var receipts: [DispatchReceipt] = []
+    /// Exact model name reported by the CLI (e.g. Claude init event), if available.
+    public var reportedModel: String?
+    /// Provider rawValue that reported the model, ensuring model metadata is scoped to matching provider.
+    public var reportedModelProvider: String?
 
     public init(id: String = shortId(), agentId: String, title: String, replyTo: String? = nil) {
         self.id = id
         self.agentId = agentId
         self.title = title
         self.replyTo = replyTo
+    }
+
+    public func verifiedModel(for profile: Profile?) -> String? {
+        guard let m = reportedModel, let p = profile, sessionProfile == p,
+              reportedModelProvider == p.provider.rawValue else { return nil }
+        return m
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, agentId, title, replyTo, sessionId, sessionProfile
+        case sessionAccess, sessionCanDispatch
+        case messages, pending, inFlight, trail, status, autoTurns, tokens, activity, runningProfile
+        case receipts, reportedModel, reportedModelProvider
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        agentId = try container.decode(String.self, forKey: .agentId)
+        title = try container.decode(String.self, forKey: .title)
+        replyTo = try container.decodeIfPresent(String.self, forKey: .replyTo)
+        sessionId = try container.decodeIfPresent(String.self, forKey: .sessionId)
+        sessionProfile = try container.decodeIfPresent(Profile.self, forKey: .sessionProfile)
+        sessionAccess = try container.decodeIfPresent(Access.self, forKey: .sessionAccess)
+        sessionCanDispatch = try container.decodeIfPresent(Bool.self, forKey: .sessionCanDispatch)
+        messages = try container.decodeIfPresent([Message].self, forKey: .messages) ?? []
+        pending = try container.decodeIfPresent([Input].self, forKey: .pending) ?? []
+        inFlight = try container.decodeIfPresent([Input].self, forKey: .inFlight) ?? []
+        trail = try container.decodeIfPresent([String].self, forKey: .trail) ?? []
+        status = try container.decodeIfPresent(ChatStatus.self, forKey: .status) ?? .idle
+        autoTurns = try container.decodeIfPresent(Int.self, forKey: .autoTurns) ?? 0
+        tokens = try container.decodeIfPresent(Int.self, forKey: .tokens) ?? 0
+        activity = try container.decodeIfPresent(String.self, forKey: .activity) ?? ""
+        runningProfile = try container.decodeIfPresent(Profile.self, forKey: .runningProfile)
+        receipts = try container.decodeIfPresent([DispatchReceipt].self, forKey: .receipts) ?? []
+        reportedModel = try container.decodeIfPresent(String.self, forKey: .reportedModel)
+        reportedModelProvider = try container.decodeIfPresent(String.self, forKey: .reportedModelProvider)
     }
 }
 
@@ -240,9 +304,15 @@ public struct Team: Codable, Sendable {
         return Team(roles: roles, agents: agents)
     }
 
+    public static var templateFileOverride: URL?
+
     /// User-saved template shared by all new projects (overrides the built-in one).
     public static var templateFile: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        if let override = templateFileOverride { return override }
+        if let env = ProcessInfo.processInfo.environment["AGENTTEAM_TEMPLATE_FILE"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("AgentTeam/template.json")
     }
 

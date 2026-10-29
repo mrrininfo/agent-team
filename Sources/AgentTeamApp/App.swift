@@ -194,8 +194,10 @@ final class AppModel {
             close()
             Self.owners[key] = Owner(self)
             orchestrator = o
-            o.startInboxPolling()
-            o.pump()
+            if !o.isInstallCheck {
+                o.startInboxPolling()
+                o.pump()
+            }
             Self.recent = [key] + Self.recent.filter { $0 != key }
             error = nil
         } catch {

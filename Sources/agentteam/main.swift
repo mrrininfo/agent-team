@@ -50,7 +50,12 @@ case "agents":
     print((try? String(contentsOf: paths.rosterFile, encoding: .utf8)) ?? "")
 
 case "dispatch":
-    let from = option("--from") ?? env["AGENTTEAM_CHAT"]
+    let fromOpt = option("--from")
+    let envChat = env["AGENTTEAM_CHAT"]
+    if let fromOpt, let envChat, fromOpt != envChat {
+        fail("--from '\(fromOpt)' khác AGENTTEAM_CHAT '\(envChat)'.")
+    }
+    let from = fromOpt ?? envChat
     let to = option("--to")
     let title = option("--new-task")
     let tab = option("--tab")
@@ -68,6 +73,10 @@ case "dispatch":
     } catch { fail("Không ghi được inbox: \(error.localizedDescription)") }
     for _ in 0..<40 {
         if let a = readAck(req.id) {
+            if let ackFp = a.fingerprint, ackFp != req.fingerprint {
+                print("handoffId: \(req.id)\ndisposition: rejected\nreason: Xung đột: ID handoff trùng nhưng fingerprint khác.")
+                exit(2)
+            }
             printAck(a)
             exit(a.disposition == "rejected" ? 2 : 0)
         }

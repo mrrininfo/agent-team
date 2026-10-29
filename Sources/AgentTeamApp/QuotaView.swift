@@ -69,10 +69,24 @@ struct QuotaPanel: View {
                         }
                         Text("Cập nhật \(q.updated.formatted(Date.RelativeFormatStyle(presentation: .named, locale: vi)))").font(.caption2).foregroundStyle(.tertiary)
                     } else {
-                        Text(p == .antigravity
-                             ? "Đang đọc từ agy (khoảng 20 giây)… Bấm Làm mới nếu chưa thấy."
-                             : "Chưa có dữ liệu — tự cập nhật sau lượt \(p.title) kế tiếp.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        switch o.quotaStatus(for: p) {
+                        case .reading:
+                            Text(p == .antigravity
+                                 ? "Đang đọc từ agy (khoảng 20 giây)… Bấm Làm mới nếu chưa thấy."
+                                 : "Đang đọc dữ liệu quota…")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        case .noBinary:
+                            Text("Chưa tìm thấy lệnh `\(p.binaryName)`. Cài đặt CLI hoặc nhập đường dẫn trong tab Team.")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        case .disabled:
+                            Text("Provider \(p.title) đã bị tắt trong cấu hình.")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        case .error(let msg, let at):
+                            Text("Lỗi lúc \(at.formatted(.dateTime.locale(vi).hour().minute())): \(msg)")
+                                .font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                        case .available:
+                            EmptyView()
+                        }
                     }
                 }
                 if p != Provider.allCases.last { Divider() }
