@@ -1,0 +1,96 @@
+import AgentTeamCore
+import AppKit
+import SwiftUI
+
+enum Selection: Hashable {
+    case team
+    case chat(String)
+}
+
+struct MainView: View {
+    @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
+    @Bindable var o: Orchestrator
+    @State private var selection: Selection? = .team
+    @State private var confirmDelete = false
+
+    var body: some View {
+        NavigationSplitView {
+            List(selection: $selection) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(o.paths.workspace.lastPathComponent, systemImage: "folder.fill").font(.headline)
+                    Text(o.paths.workspace.path).font(.caption2).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
+                }
+                .padding(.vertical, 4)
+                NavigationLink(value: Selection.team) { Label("Team & Provider", systemImage: "person.3") }
+                ForEach(o.team.agents) { agent in
+                    Section {
+                        ForEach(o.chats(of: agent.id)) { c in
+                            NavigationLink(value: Selection.chat(c.id)) {
+                                HStack(spacing: 6) {
+                                    Circle().fill(c.status.color).frame(width: 8, height: 8)
+                                    Text(c.title).lineLimit(1)
+                                }
+                            }
+                            .contextMenu { Button("Xoá chat", role: .destructive) { o.deleteChat(c.id) } }
+                        }
+                    } header: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(o.team.role(agent.roleId)?.name ?? agent.roleId) · \(agent.id)")
+                                Text(o.team.effectiveProfile(for: agent)?.label ?? "không khả dụng")
+                                    .font(.caption2).foregroundStyle(o.team.effectiveProfile(for: agent) == agent.profile ? Color.secondary : .orange)
+                            }
+                            Spacer()
+                            Button {
+                                selection = .chat(o.newChat(agentId: agent.id, title: "Chat mới"))
+                            } label: { Image(systemName: "plus") }
+                            .buttonStyle(.borderless)
+                            .help("Chat mới với agent này")
+                        }
+                    }
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 230, ideal: 270)
+        } detail: {
+            Group {
+                switch selection {
+                case .chat(let id): ChatView(o: o, chatId: id).id(id)
+                default: TeamView(o: o)
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { QuotaBar(o: o) }
+        }
+        .confirmationDialog("Xoá dữ liệu Agent Team của \(o.paths.workspace.lastPathComponent)?", isPresented: $confirmDelete) {
+            Button("Chuyển vào Thùng rác", role: .destructive) { model.deleteProjectData() }
+        } message: {
+            Text("Chuyển thư mục \(o.paths.root.path) (team, lịch sử chat, ghi chú, quyết định) vào Thùng rác và gỡ dự án khỏi danh sách. Mã nguồn và các file khác của dự án KHÔNG bị đụng tới. Khôi phục được từ Thùng rác.")
+        }
+        .navigationTitle(o.paths.workspace.lastPathComponent)
+        .navigationSubtitle(o.paths.workspace.path)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Text("\(o.runningCount) đang chạy · \(o.chats.filter { $0.status == .queued }.count) chờ · \(o.totalTokens.formatted()) token")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button("Mở dự án trong cửa sổ mới…") {
+                        if let url = AppModel.pickFolder() { openWindow(value: url.standardizedFileURL.path) }
+                    }
+                    Menu("Gần đây (cửa sổ mới)") {
+                        ForEach(AppModel.recent.filter { $0 != o.paths.workspace.standardizedFileURL.path }, id: \.self) { p in
+                            Button(URL(fileURLWithPath: p).lastPathComponent) { openWindow(value: p) }
+                        }
+                    }
+                    Button("Đổi dự án ở cửa sổ này…") { model.chooseWorkspace() }
+                    Button("Hiện trong Finder") { NSWorkspace.shared.activateFileViewerSelecting([o.paths.workspace]) }
+                    Divider()
+                    Button("Đóng dự án") { model.close() }
+                    Button("Xoá dữ liệu Agent Team của dự án…", role: .destructive) { confirmDelete = true }
+                } label: { Label("Dự án", systemImage: "folder") }
+                .help("Đang mở: \(o.paths.workspace.path). Mở song song dự án khác: ⌘O.")
+            }
+        }
+    }
+}
