@@ -33,6 +33,18 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
    - Hết thời gian chờ (mặc định 30 phút), app tự gỡ đánh dấu limit và chạy tiếp các chat đang chờ,
      không cần ai bấm (học từ cơ chế auto-resume của agent-teams-ai).
 
+5. **Bộ mẫu team** (ngay trên danh sách vị trí): Mặc định, Design (tạo ảnh), Assistant (hỏi đáp kiểu chatbot).
+   Sửa vai trò/vị trí thì thành **Custom (chưa lưu)**; bấm **Lưu Custom** để giữ. Custom chỉ thuộc dự án đó.
+6. **Provider**: đèn xanh = đã đăng nhập, cam = đang bị limit, đỏ = chưa đăng nhập/không tìm thấy CLI, xám = tắt.
+   **Login/Logout** mở Terminal chạy lệnh đăng nhập của CLI (Antigravity: gõ `/login` hoặc `/logout` trong TUI).
+7. **Chat**: tin của bạn bên phải, AI bên trái. Đính kèm bằng nút kẹp giấy, kéo thả, hoặc ⌘V ảnh/file đã copy;
+   file được chép vào `.agentteam/attachments/<chat>/` và gửi kèm đường dẫn cho agent.
+   Đường dẫn file trong tin nhắn bấm được và mở trong **khung xem trước** bên phải (nút sidebar trên toolbar).
+8. **Đổi tên dự án**: bấm vào tên ở đầu sidebar. Chỉ đổi tên hiển thị, thư mục trên ổ đĩa giữ nguyên.
+9. **Treo / rớt mạng**: agent không in ra gì quá 20 phút (chỉnh trong Vận hành) thì app dừng nó cùng các lệnh con,
+   chạy lại một lần kèm cảnh báo, treo lần nữa thì báo lỗi về người giao. Lỗi mạng thì giữ nguyên việc,
+   tự thử lại theo thời gian giãn dần hoặc ngay khi có mạng.
+
 ## Tiết kiệm token
 - Toolbar hiện tổng token, header của mỗi chat hiện token riêng (input không cache + output).
 - Resume session của provider, nên hợp đồng và roster chỉ gửi ở lượt đầu.

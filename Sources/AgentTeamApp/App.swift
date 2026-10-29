@@ -157,6 +157,13 @@ final class AppModel {
         }
     }
 
+    /// The name the user gave the project (stored in its team.json), else the folder name.
+    static func displayName(_ path: String) -> String {
+        let file = TeamPaths(workspace: URL(fileURLWithPath: path)).teamFile
+        return (try? Data(contentsOf: file)).flatMap { try? jsonDecoder.decode(Team.self, from: $0) }?.name
+            ?? URL(fileURLWithPath: path).lastPathComponent
+    }
+
     static func pickFolder() -> URL? {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -255,7 +262,7 @@ struct RootView: View {
                             Button { model.open(URL(fileURLWithPath: p)) } label: {
                                 HStack {
                                     Image(systemName: "folder")
-                                    Text(URL(fileURLWithPath: p).lastPathComponent).bold()
+                                    Text(AppModel.displayName(p)).bold()
                                     Text(p).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                                     if AppModel.liveOwner(p) != nil { Text("· đang mở — bấm để chuyển tới").font(.caption).foregroundStyle(.orange) }
                                 }

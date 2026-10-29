@@ -227,6 +227,12 @@ public struct Team: Codable, Sendable {
     public var maxDispatchPerTurn = 6
     /// Max Planner ↔ Critic rounds (nil = 2). Optional so team.json files from older versions still decode.
     public var debateRounds: Int?
+    /// Name shown instead of the folder name (nil = folder name).
+    public var name: String?
+    /// The project's own saved setup, offered as "Custom" in the preset menu; never shared with other projects.
+    public var customSetup: TeamSetup?
+    /// A running turn with no output for this many minutes is treated as hung (nil = 20).
+    public var stallMinutes: Int?
 
     public init(roles: [Role], agents: [Agent]) {
         self.roles = roles
@@ -304,28 +310,142 @@ public struct Team: Codable, Sendable {
         return Team(roles: roles, agents: agents)
     }
 
-    public static var templateFileOverride: URL?
+    public var setup: TeamSetup { TeamSetup(roles: roles, agents: agents) }
 
-    /// User-saved template shared by all new projects (overrides the built-in one).
-    public static var templateFile: URL {
-        if let override = templateFileOverride { return override }
-        if let env = ProcessInfo.processInfo.environment["AGENTTEAM_TEMPLATE_FILE"], !env.isEmpty {
-            return URL(fileURLWithPath: env)
+    /// The preset the current roles and agents equal; nil means the project's own Custom setup.
+    public var preset: TeamPreset? { TeamPreset.allCases.first { $0.setup.sameShape(as: setup) } }
+
+    /// Replaces roles and agents, keeping agent ids of matching roles so their chats stay attached.
+    public mutating func apply(_ s: TeamSetup) {
+        var free = agents
+        agents = s.agents.map { a in
+            var a = a
+            if let i = free.firstIndex(where: { $0.roleId == a.roleId }) { a.id = free.remove(at: i).id }
+            return a
         }
-        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AgentTeam/template.json")
+        roles = s.roles
+    }
+}
+
+/// Roles + agents: the part of a team that presets set.
+public struct TeamSetup: Codable, Hashable, Sendable {
+    public var roles: [Role]
+    public var agents: [Agent]
+
+    public init(roles: [Role], agents: [Agent]) {
+        self.roles = roles
+        self.agents = agents
     }
 
-    public static func template() -> Team {
-        (try? Data(contentsOf: templateFile)).flatMap { try? jsonDecoder.decode(Team.self, from: $0) } ?? starter()
+    /// Same roles and the same provider/model per role; agent ids are random, so they are ignored.
+    public func sameShape(as o: TeamSetup) -> Bool {
+        roles == o.roles && agents.map { [$0.roleId, $0.profile.label] } == o.agents.map { [$0.roleId, $0.profile.label] }
+    }
+}
+
+public enum TeamPreset: String, CaseIterable, Identifiable, Sendable {
+    case standard, design, assistant
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .standard: "Mặc định"
+        case .design: "Design"
+        case .assistant: "Assistant"
+        }
     }
 
-    public func saveAsTemplate() throws {
-        var t = self
-        t.limitedProviders = []
-        t.limitedSince = [:]
-        try FileManager.default.createDirectory(at: Team.templateFile.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try jsonEncoder.encode(t).write(to: Team.templateFile, options: .atomic)
+    public var setup: TeamSetup {
+        switch self {
+        case .standard: Team.starter().setup
+        case .design: Self.designSetup
+        case .assistant: Self.assistantSetup
+        }
+    }
+
+    /// Graphic design: brief → image → review → finishing. Codex is the only verified image generator,
+    /// so its quota is kept for drawing and the other roles run on Antigravity.
+    static var designSetup: TeamSetup {
+        TeamSetup(roles: [
+            Role(id: "lead", name: "Art Director", contract: """
+                Art director: nhận yêu cầu thiết kế, điều phối, chốt bản giao. Không tự viết prompt hay vẽ.
+                1. Yêu cầu thiếu thông tin quan trọng (mục đích, kích thước/tỉ lệ, chữ cần có, nơi đăng) thì hỏi người dùng tối đa 3 câu ngắn trước khi giao.
+                2. Giao brief viết brief + prompt (gửi nguyên văn yêu cầu người dùng).
+                3. Giao generator tạo ảnh theo prompt, lưu vào design/<tên-việc>/.
+                4. Giao reviewer chấm ảnh theo brief. KHÔNG ĐẠT: gửi prompt đã sửa của reviewer cho generator bằng --tab; tối đa 2 vòng.
+                5. Ảnh có chữ, hoặc cần kích thước/định dạng cụ thể: giao finisher hoàn thiện.
+                6. Báo người dùng: đường dẫn các file, khác nhau thế nào, khuyến nghị chọn bản nào.
+                Người dùng chọn/chê ảnh nào thì ghi ngắn gọn vào design/style-guide.md (thích gì, ghét gì, vì sao) để các lần sau làm đúng gu.
+                """, access: .write, canDispatch: true,
+                fallbacks: [Profile(.antigravity, "gemini-4-argon-high")]),
+            Role(id: "brief", name: "Brief", contract: """
+                Biến yêu cầu thành brief thiết kế. Đọc design/style-guide.md trước nếu có, và theo đúng nó.
+                Brief gồm: mục đích, đối tượng xem, tỉ lệ/kích thước, bố cục, phong cách, bảng màu (mã hex), ánh sáng, chữ cần có (nguyên văn), điều cấm.
+                Rồi viết 2-3 prompt tạo ảnh bằng tiếng Anh, mỗi prompt một hướng khác nhau rõ rệt, kèm một dòng giải thích hướng đó.
+                Không đưa chữ dài vào prompt: chữ chính xác do finisher chèn sau. Kết thúc bằng checklist nghiệm thu 5-8 mục để reviewer chấm.
+                """, access: .readOnly,
+                fallbacks: [Profile(.antigravity, "gemini-4-argon-medium")]),
+            Role(id: "generator", name: "Generator", contract: """
+                Tạo ảnh bằng công cụ tạo ảnh, đúng nguyên văn các prompt được giao; không tự đổi ý tưởng.
+                Lưu mỗi ảnh vào design/<tên-việc>/v<số>-<hướng>.png trong workspace (không ghi đè bản cũ); công cụ lưu chỗ khác thì chép về đó.
+                Báo cáo: đường dẫn từng file, prompt đã dùng cho từng file. Không tạo được thì báo rõ lỗi, không giả vờ đã xong.
+                """, access: .write),
+            Role(id: "reviewer", name: "Reviewer", contract: """
+                Mở và xem từng file ảnh được giao, chấm theo checklist của brief và design/style-guide.md.
+                Mỗi ảnh: ĐẠT/KHÔNG ĐẠT từng mục, lỗi cụ thể (chữ sai chính tả, tay/mặt méo, bố cục lệch, sai màu, thừa chi tiết).
+                Ảnh KHÔNG ĐẠT: viết lại prompt đã sửa, chỉ đổi phần gây lỗi. Xếp hạng các ảnh và nói rõ bản nào tốt nhất, vì sao.
+                Không khen xã giao. Ảnh không mở được thì báo lại, không đoán nội dung.
+                """, access: .readOnly,
+                fallbacks: [Profile(.antigravity, "claude-sonnet-5-5-high")]),
+            Role(id: "finisher", name: "Finisher", contract: """
+                Hoàn thiện ảnh đã duyệt bằng công cụ trên máy (sips, Python/Pillow, SVG...): chèn chữ chính xác theo brief, cắt/đổi kích thước,
+                thêm lề, xuất PNG/JPG/WebP theo yêu cầu. Lưu thành file mới design/<tên-việc>/final-<kích-thước>.<đuôi>, không ghi đè bản gốc.
+                Báo cáo: file đã tạo, kích thước thật (đo lại sau khi xuất), lệnh đã chạy.
+                """, access: .write,
+                fallbacks: [Profile(.codex, "gpt-6-luna")]),
+        ], agents: [
+            Agent(roleId: "lead", profile: Profile(.antigravity, "claude-sonnet-5-5-high")),
+            Agent(roleId: "brief", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
+            Agent(roleId: "generator", profile: Profile(.codex, "gpt-6.1-sol", effort: "medium")),
+            Agent(roleId: "reviewer", profile: Profile(.antigravity, "gemini-4-argon-high")),
+            Agent(roleId: "finisher", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
+        ])
+    }
+
+    /// Chatbot-style Q&A: the lead answers itself; research and checking only when needed.
+    static var assistantSetup: TeamSetup {
+        TeamSetup(roles: [
+            Role(id: "lead", name: "Assistant", contract: """
+                Trợ lý trả lời trực tiếp như chatbot. Mặc định tự trả lời, không giao việc.
+                Cách trả lời:
+                - Trả lời đúng câu hỏi ngay câu đầu, rồi mới giải thích nếu cần. Ngắn gọn, cụ thể, có ví dụ/bước làm khi hữu ích.
+                - Không lan man sang chủ đề người dùng không hỏi, không liệt kê mọi khả năng; đưa một khuyến nghị rõ ràng.
+                - Không chắc thì nói không chắc và vì sao; không bịa số liệu, tên, đường link.
+                - Câu hỏi mơ hồ đến mức trả lời sẽ sai hướng: hỏi lại đúng 1 câu ngắn.
+                Chỉ giao việc khi thật sự cần:
+                - researcher: cần thông tin mới/sau thời điểm kiến thức của bạn, số liệu cụ thể, đọc tài liệu/file dài.
+                - checker: câu trả lời liên quan tiền, sức khoẻ, pháp lý, bảo mật, hoặc lệnh có thể làm mất dữ liệu.
+                Nhận kết quả về thì tổng hợp lại thành câu trả lời ngắn, ghi nguồn nếu có.
+                """, access: .readOnly, canDispatch: true,
+                fallbacks: [Profile(.antigravity, "gemini-4-argon-medium"), Profile(.codex, "gpt-6-luna")]),
+            Role(id: "researcher", name: "Researcher", contract: """
+                Tra cứu đúng câu hỏi được giao: tìm trên web hoặc đọc file/tài liệu được chỉ định.
+                Trả về: các dữ kiện tìm được (gạch đầu dòng), nguồn của từng dữ kiện (link hoặc file:dòng), ngày của thông tin nếu có.
+                Chỉ báo điều tìm thấy, không suy diễn thêm. Không tìm được hoặc các nguồn mâu thuẫn thì nói rõ.
+                Ngắn gọn, tối đa khoảng 15 dòng.
+                """, access: .readOnly,
+                fallbacks: [Profile(.codex, "gpt-6-luna")]),
+            Role(id: "checker", name: "Checker", contract: """
+                Kiểm tra câu trả lời nháp được gửi: sai sự thật, tính toán sai, thiếu cảnh báo quan trọng, lệnh nguy hiểm, lời khuyên quá chung chung.
+                Trả về: ĐÚNG hoặc CẦN SỬA; nếu cần sửa thì liệt kê từng điểm cụ thể và cách sửa. Không viết lại toàn bộ câu trả lời.
+                Không bới lỗi nhỏ về câu chữ.
+                """, access: .readOnly,
+                fallbacks: [Profile(.antigravity, "gemini-4-argon-medium")]),
+        ], agents: [
+            Agent(roleId: "lead", profile: Profile(.antigravity, "claude-sonnet-5-5-medium")),
+            Agent(roleId: "researcher", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
+            Agent(roleId: "checker", profile: Profile(.codex, "gpt-6-luna", effort: "medium")),
+        ])
     }
 }
 

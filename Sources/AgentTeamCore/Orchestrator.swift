@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import Network
 import Observation
 
 /// Runs one provider turn, streaming events; returns an error description when the process failed.
@@ -67,6 +68,16 @@ public final class Orchestrator {
     /// When true, orchestrator is in install-check mode: writes health.json but keeps pump, polling and probe disabled.
     @ObservationIgnored public var isInstallCheck: Bool = false
     @ObservationIgnored private var cachedGitSHA: String = ""
+    /// Running chat → last time its CLI produced any output; the watchdog stops turns silent for `stallLimit`.
+    @ObservationIgnored public private(set) var lastSignal: [String: Date] = [:]
+    @ObservationIgnored var stalled: Set<String> = []
+    @ObservationIgnored var stallRetries: [String: Int] = [:]
+    @ObservationIgnored var netRetries: [String: Int] = [:]
+    /// Chats waiting to retry after a network failure; cleared early when the network comes back.
+    public private(set) var retryAt: [String: Date] = [:]
+    public private(set) var online = true
+    @ObservationIgnored var pathMonitor: NWPathMonitor?
+    public var stallLimit: TimeInterval { TimeInterval(max(1, team.stallMinutes ?? 20) * 60) }
 
     public var agyBackoffMinutes: Int {
         let mins = [10, 20, 40, 60]
@@ -120,10 +131,10 @@ public final class Orchestrator {
                 if !isInstallCheck {
                     try? data.write(to: paths.teamFile.appendingPathExtension("bak-\(Int(Date().timeIntervalSince1970))"))
                 }
-                team = Team.template()
+                team = Team.starter()
             }
         } else {
-            team = Team.template()
+            team = Team.starter()
         }
         self.runner = runner
         if !isInstallCheck {
@@ -312,12 +323,11 @@ public final class Orchestrator {
         enqueue(to, pkg, kind: .handoff)
     }
 
-    /// Replaces roles and agents with template. Only while no chat exists, so no chat loses its agent.
-    public func applyTemplate() {
-        guard chats.isEmpty else { return }
-        let t = Team.template()
-        team.roles = t.roles
-        team.agents = t.agents
+    /// Switches this project to a preset or its Custom setup. Not while a turn runs: its agent could vanish mid-turn.
+    /// Agents of roles kept by the new setup keep their ids, so their chats stay attached.
+    public func applySetup(_ s: TeamSetup) {
+        guard runningCount == 0 else { return }
+        team.apply(s)
     }
 
     /// One-click migration: every agent on `provider` moves to `profile`.
@@ -351,7 +361,7 @@ public final class Orchestrator {
 
     public func pump() {
         guard !suspended, !isInstallCheck else { return }
-        while runningCount < team.maxConcurrent, let next = chats.first(where: { $0.status == .queued }) {
+        while runningCount < team.maxConcurrent, let next = chats.first(where: { $0.status == .queued && retryAt[$0.id] == nil }) {
             update(next.id) { $0.status = .running }
             Task { await runTurn(next.id) }
         }
@@ -459,7 +469,9 @@ public final class Orchestrator {
         var turnReportedModel: String?
         let req = TurnRequest(prompt: prompt, profile: profile, sessionId: resumable ? c.sessionId : nil,
                               access: role.access, canDispatch: role.canDispatch)
+        lastSignal[chatId] = Date()
         let exitError = await runner(chatId, req, paths.workspace) { [weak self] e in
+            self?.lastSignal[chatId] = Date()
             switch e {
             case .session(let s):
                 self?.update(chatId) {
@@ -496,6 +508,9 @@ public final class Orchestrator {
             }
         }
         let wasStopped = stopping.remove(chatId) != nil
+        let wasStalled = stalled.remove(chatId) != nil
+        let lastStep = chat(chatId)?.activity ?? ""
+        lastSignal[chatId] = nil
         update(chatId) { $0.activity = ""; $0.runningProfile = nil }
         if suspended && final == nil {
             update(chatId) { $0.pending = inputs + $0.pending; $0.inFlight = []; $0.status = .queued }
@@ -508,6 +523,33 @@ public final class Orchestrator {
         }
         guard let c = chat(chatId) else { return pump() }
         let delegated = inputs.contains { !$0.fromUser }
+        if final != nil { stallRetries[chatId] = nil; netRetries[chatId] = nil }
+
+        if wasStalled && final == nil {
+            if !online { return waitForNetwork(chatId, reason: "mất mạng trong lúc chạy") }
+            let n = (stallRetries[chatId] ?? 0) + 1
+            stallRetries[chatId] = n
+            let mins = Int(stallLimit / 60)
+            if n == 1 {
+                let note = Input(text: """
+                    [Hệ thống] Lượt trước bị dừng vì không có tín hiệu \(mins) phút ở bước: \(lastStep.isEmpty ? "không rõ" : lastStep).
+                    Đừng chạy lại y nguyên lệnh đó. Lệnh/test có thể chạy lâu thì đặt giới hạn thời gian và kiểm tra kết quả;
+                    vẫn không xong thì dừng và báo lại thay vì chờ.
+                    """, fromUser: false)
+                update(chatId) {
+                    $0.pending = inputs + [note] + $0.pending
+                    $0.inFlight = []
+                    $0.status = .queued
+                    $0.messages.append(Message(.system, "Chạy lại một lần, kèm cảnh báo không lặp lại lệnh bị treo."))
+                }
+            } else {
+                let msg = "Bị treo \(n) lần liên tiếp (lần cuối ở bước: \(lastStep)). Đã dừng; gửi tin nhắn để thử lại."
+                update(chatId) { $0.inFlight = []; $0.status = .failed; $0.messages.append(Message(.system, msg)) }
+                if delegated { callback(from: c, status: "lỗi", text: msg, turnProfile: profile) }
+            }
+            recordHealth()
+            return pump()
+        }
 
         if let final {
             update(chatId) {
@@ -529,6 +571,9 @@ public final class Orchestrator {
                 $0.messages.append(Message(.system, "\(profile.provider.title) bị limit: \(clip(error, 300))\n"
                     + (canContinue ? "Tự động chuyển sang provider dự phòng kèm gói bàn giao." : "Bật provider khác, thêm fallback cho vai trò, hoặc dùng Chuyển việc.")))
             }
+        } else if let error, isNetworkError(error) || !online, (netRetries[chatId] ?? 0) < Self.netBackoff.count {
+            update(chatId) { $0.pending = $0.inFlight + $0.pending; $0.inFlight = [] }
+            return waitForNetwork(chatId, reason: clip(error, 200))
         } else {
             let msg = error ?? "Không nhận được kết quả từ \(profile.provider.binaryName)."
             update(chatId) {
@@ -540,6 +585,56 @@ public final class Orchestrator {
         }
         recordHealth()
         pump()
+    }
+
+    static let netBackoff: [TimeInterval] = [15, 30, 60, 120, 300, 600, 600, 600]
+
+    /// Requeues the chat's work to retry after a back-off, or as soon as the network is reported back.
+    func waitForNetwork(_ chatId: String, reason: String) {
+        let n = netRetries[chatId] ?? 0
+        netRetries[chatId] = n + 1
+        let delay = Self.netBackoff[min(n, Self.netBackoff.count - 1)]
+        retryAt[chatId] = Date().addingTimeInterval(delay)
+        update(chatId) {
+            $0.pending = $0.inFlight + $0.pending
+            $0.inFlight = []
+            $0.status = .queued
+            $0.messages.append(Message(.system, "Mất kết nối (\(reason)). Tự thử lại sau \(Int(delay)) giây, hoặc ngay khi có mạng (lần \(n + 1)/\(Self.netBackoff.count))."))
+        }
+        recordHealth()
+        pump()
+    }
+
+    /// Called every second: stops turns with no output for `stallLimit` (with their child commands) and
+    /// releases network retries whose wait is over.
+    public func checkStalls(now: Date = Date()) {
+        for (id, t) in lastSignal where now.timeIntervalSince(t) >= stallLimit && !stalled.contains(id) && !stopping.contains(id) {
+            stalled.insert(id)
+            let step = chat(id)?.activity ?? ""
+            update(id) {
+                $0.messages.append(Message(.system, "Không có tín hiệu \(Int(stallLimit / 60)) phút (bước cuối: \(step.isEmpty ? "không rõ" : step)). Dừng tiến trình cùng các lệnh con."))
+            }
+            cancelTurn(id)
+        }
+        if retryAt.values.contains(where: { $0 <= now }) {
+            retryAt = retryAt.filter { $0.value > now }
+            pump()
+        }
+    }
+
+    /// Skips the remaining network back-off of one chat.
+    public func retryNow(_ chatId: String) {
+        retryAt[chatId] = nil
+        pump()
+    }
+
+    func setOnline(_ ok: Bool) {
+        guard ok != online else { return }
+        online = ok
+        if ok && !retryAt.isEmpty {
+            retryAt = [:]
+            pump()
+        }
     }
 
     func callback(from c: Chat, status: String, text: String, turnProfile: Profile? = nil, turnModel: String? = nil) {
@@ -566,10 +661,18 @@ public final class Orchestrator {
         guard !isInstallCheck else { return }
         timer?.invalidate()
         refreshQuotas()
+        let m = NWPathMonitor()
+        m.pathUpdateHandler = { [weak self] path in
+            let ok = path.status == .satisfied
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.setOnline(ok) } }
+        }
+        m.start(queue: .global(qos: .utility))
+        pathMonitor = m
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.processInbox()
                 self?.releaseExpiredLimits()
+                self?.checkStalls()
                 guard let self else { return }
                 self.ticks += 1
                 if self.ticks % 60 == 0 { self.refreshQuotas() }
@@ -577,7 +680,11 @@ public final class Orchestrator {
         }
     }
 
-    public func stopInboxPolling() { timer?.invalidate() }
+    public func stopInboxPolling() {
+        timer?.invalidate()
+        pathMonitor?.cancel()
+        pathMonitor = nil
+    }
 
     public func refreshQuotas(force: Bool = false) {
         guard !isInstallCheck else { return }

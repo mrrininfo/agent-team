@@ -97,7 +97,29 @@ public final class ProcessRunner {
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    public func cancel(_ chatId: String) { processes[chatId]?.terminate() }
+    /// Stops the turn's CLI and every command it started: a hung tool command (test, server, build) is usually a
+    /// grandchild, and killing only the CLI would leave it running and holding the output pipe open.
+    public func cancel(_ chatId: String) {
+        guard let p = processes[chatId], p.isRunning else { return }
+        Self.terminateTree(p.processIdentifier)
+    }
+
+    nonisolated static func descendants(of pid: pid_t) -> [pid_t] {
+        var buf = [pid_t](repeating: 0, count: 256)
+        let n = proc_listchildpids(pid, &buf, Int32(buf.count * MemoryLayout<pid_t>.size))
+        return buf.prefix(max(0, Int(n))).filter { $0 > 1 }.flatMap { [$0] + descendants(of: $0) }
+    }
+
+    nonisolated public static func descendantsForChecks(of pid: pid_t) -> [pid_t] { descendants(of: pid) }
+
+    /// SIGTERM to the process and its descendants (children first), SIGKILL to whatever is left after 3 s.
+    nonisolated public static func terminateTree(_ pid: pid_t) {
+        let all = descendants(of: pid).reversed() + [pid]
+        for p in all { kill(p, SIGTERM) }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            for p in all where kill(p, 0) == 0 { kill(p, SIGKILL) }
+        }
+    }
 
     static func recordRunning(_ paths: TeamPaths, _ chatId: String, _ record: RunningProcessRecord?) {
         var m: [String: RunningProcessRecord] = [:]
@@ -165,10 +187,10 @@ public final class ProcessRunner {
                 || (currentPath == resolvedRecBinary)
                 || (resolvedCurrentPath != nil && (resolvedCurrentPath == rec.binary || resolvedCurrentPath == resolvedRecBinary))
 
-            let isOwned = currentStart != nil
-                && currentStart!.0 == rec.startTimeSec
-                && currentStart!.1 == rec.startTimeUsec
-                && pathMatches
+            // Same pid + same start time to the microsecond is our child; the path only helps when the start time is
+            // unreadable. CLIs run as scripts (codex = node) show the interpreter as their path, so it cannot be required.
+            let isOwned = currentStart.map { $0.0 == rec.startTimeSec && $0.1 == rec.startTimeUsec } ?? false
+                || (currentStart == nil && pathMatches)
 
             guard isOwned else {
                 // Process is alive, startTime matches (or could not be read), but path cannot be verified:
@@ -178,8 +200,10 @@ public final class ProcessRunner {
                 continue
             }
 
-            // Confirmed our process: send SIGTERM and wait up to 5 seconds
+            // Confirmed our process: stop it and the commands it started, wait up to 5 seconds
+            let tree = descendants(of: rec.pid)
             kill(rec.pid, SIGTERM)
+            for p in tree { kill(p, SIGTERM) }
             var exited = false
             for _ in 0..<50 {
                 usleep(100_000) // 100ms
@@ -271,5 +295,83 @@ public final class ProcessRunner {
         for await s in exited { status = s }
         let stderr = await stderrTask.value
         return status == 0 ? nil : "exit \(status): " + tail(stderr.trimmingCharacters(in: .whitespacesAndNewlines), 1500)
+    }
+}
+
+// MARK: - Account
+
+/// Whether a provider CLI is signed in. `ok == nil` means not checked or the check itself failed.
+public struct AccountStatus: Sendable, Equatable {
+    public var ok: Bool?
+    public var detail: String
+
+    public init(ok: Bool?, detail: String) {
+        self.ok = ok
+        self.detail = detail
+    }
+}
+
+extension Provider {
+    /// Read-only command that tells whether the CLI is signed in (agy has none: listing models needs a session).
+    public var statusArguments: [String] {
+        switch self {
+        case .claude: ["auth", "status"]
+        case .codex: ["login", "status"]
+        case .antigravity: ["models"]
+        }
+    }
+
+    /// Shell commands for the Terminal window opened by Login/Logout; agy signs in/out from its own TUI.
+    public func accountCommand(_ binary: String, login: Bool) -> String {
+        let b = "'\(binary.replacingOccurrences(of: "'", with: "'\\''"))'"
+        switch self {
+        case .claude: return "\(b) auth \(login ? "login" : "logout")"
+        case .codex: return "\(b) \(login ? "login" : "logout")"
+        case .antigravity:
+            return "echo 'Trong Antigravity gõ \(login ? "/login" : "/logout") rồi Enter; xong gõ /exit.'; \(b)"
+        }
+    }
+
+    public func parseStatus(exit: Int32, output: String) -> AccountStatus {
+        switch self {
+        case .claude:
+            guard let o = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
+                  let logged = o["loggedIn"] as? Bool else { return AccountStatus(ok: exit == 0 ? nil : false, detail: tail(output, 200)) }
+            return AccountStatus(ok: logged, detail: logged ? (o["email"] as? String ?? "đã đăng nhập") : "chưa đăng nhập")
+        case .codex:
+            let logged = exit == 0 && output.localizedCaseInsensitiveContains("logged in")
+                && !output.localizedCaseInsensitiveContains("not logged in")
+            return AccountStatus(ok: logged, detail: logged ? output.trimmingCharacters(in: .whitespacesAndNewlines) : "chưa đăng nhập")
+        case .antigravity:
+            let logged = exit == 0 && output.contains("gemini")
+            return AccountStatus(ok: logged, detail: logged ? "đã đăng nhập" : "chưa đăng nhập hoặc không kết nối được: " + tail(output, 160))
+        }
+    }
+}
+
+extension ProcessRunner {
+    /// Runs the provider's status command off the main thread, giving up after 30 s.
+    public func accountStatus(_ provider: Provider, override: String?) async -> AccountStatus {
+        guard let bin = binary(for: provider, override: override) else {
+            return AccountStatus(ok: false, detail: "không tìm thấy lệnh \(provider.binaryName)")
+        }
+        let env = ["PATH": searchPath, "HOME": NSHomeDirectory()]
+        return await Task.detached {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: bin)
+            p.arguments = provider.statusArguments
+            p.environment = ProcessInfo.processInfo.environment.merging(env) { $1 }
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = out
+            p.standardInput = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return AccountStatus(ok: nil, detail: "không chạy được \(bin)") }
+            let timer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 30, execute: timer)
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            timer.cancel()
+            return provider.parseStatus(exit: p.terminationStatus, output: String(decoding: data, as: UTF8.self))
+        }.value
     }
 }

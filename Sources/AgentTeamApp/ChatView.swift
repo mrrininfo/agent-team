@@ -5,8 +5,14 @@ import SwiftUI
 struct ChatView: View {
     @Bindable var o: Orchestrator
     let chatId: String
+    @Environment(PreviewState.self) private var preview
+    @Environment(AppModel.self) private var model
     @State private var draft = ""
     @State private var transferFrom = ""
+    @State private var attachments: [Attachment] = []
+    @State private var attachError = ""
+    @State private var dropTargeted = false
+    @State private var pasteMonitor: Any?
 
     var body: some View {
         if let c = o.chat(chatId), let i = o.team.agents.firstIndex(where: { $0.id == c.agentId }) {
@@ -17,11 +23,28 @@ struct ChatView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(c.messages) { MessageRow(m: $0) }
+                            ForEach(c.messages) { MessageRow(m: $0, root: o.paths.workspace) }
                             if !c.activity.isEmpty {
                                 HStack(spacing: 8) {
                                     ProgressView().controlSize(.small)
                                     Text(c.activity).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                }
+                                // Silence watchdog, shown before it acts so a long command is visible as such.
+                                TimelineView(.periodic(from: .now, by: 15)) { ctx in
+                                    if let t = o.lastSignal[chatId], ctx.date.timeIntervalSince(t) >= 120 {
+                                        let mins = Int(ctx.date.timeIntervalSince(t) / 60)
+                                        Label("Không có tín hiệu \(mins) phút; tự dừng và chạy lại khi tới \(Int(o.stallLimit / 60)) phút.",
+                                              systemImage: "hourglass")
+                                            .font(.caption).foregroundStyle(.orange)
+                                    }
+                                }
+                            }
+                            if let at = o.retryAt[chatId] {
+                                HStack {
+                                    Label("Chờ mạng: tự thử lại lúc \(at.formatted(date: .omitted, time: .shortened)) hoặc ngay khi có mạng.",
+                                          systemImage: "wifi.exclamationmark")
+                                        .font(.caption).foregroundStyle(.orange)
+                                    Button("Thử ngay") { o.retryNow(chatId) }.controlSize(.small)
                                 }
                             }
                             Color.clear.frame(height: 1).id("end")
@@ -31,6 +54,12 @@ struct ChatView: View {
                     .onChange(of: c.messages.count) { proxy.scrollTo("end") }
                     .onAppear { proxy.scrollTo("end") }
                 }
+                // Links in messages (reports, attachments, file paths) open in the preview pane.
+                .environment(\.openURL, OpenURLAction { url in
+                    guard let file = resolveLocal(url, root: o.paths.workspace) else { return .systemAction }
+                    preview.open(file)
+                    return .handled
+                })
                 Divider()
                 transferBar(c, agent)
                 composer(c)
@@ -101,14 +130,75 @@ struct ChatView: View {
     }
 
     func sendDraft() {
-        let t = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
+        var t = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty || !attachments.isEmpty else { return }
+        if !attachments.isEmpty {
+            do {
+                let saved = try Attachment.store(attachments, in: o.paths.root.appendingPathComponent("attachments/\(chatId)"))
+                let rel = saved.map { $0.path.replacingOccurrences(of: o.paths.workspace.path + "/", with: "") }
+                t += (t.isEmpty ? "" : "\n\n") + Attachment.marker + "\n" + rel.map { "- \($0)" }.joined(separator: "\n")
+            } catch {
+                attachError = "Không lưu được file đính kèm: \(error.localizedDescription)"
+                return
+            }
+        }
         o.send(t, to: chatId)
         draft = ""
+        attachments = []
+        attachError = ""
+    }
+
+    func add(_ items: [Attachment]) {
+        let (ok, err) = Attachment.accept(items, existing: attachments)
+        attachments += ok
+        attachError = err ?? ""
+    }
+
+    func pickFiles() {
+        let panel = NSOpenPanel()
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.message = "Chọn file/ảnh đính kèm (tối đa \(Attachment.maxCount) file, mỗi file ≤ \(Attachment.maxBytes / 1_000_000) MB)"
+        if panel.runModal() == .OK { add(panel.urls.map { .file($0) }) }
+    }
+
+    /// ⌘V with files or an image on the clipboard attaches them; plain text pastes as usual.
+    func installPasteMonitor() {
+        let window = model.window
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            // Only this window's composer: every open chat window installs its own monitor.
+            guard e.window === window, e.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  e.charactersIgnoringModifiers == "v",
+                  let tv = e.window?.firstResponder as? NSTextView, !tv.isFieldEditor,
+                  let items = Attachment.fromPasteboard(.general) else { return e }
+            add(items)
+            return nil
+        }
     }
 
     func composer(_ c: Chat) -> some View {
-        HStack(alignment: .bottom) {
+        VStack(alignment: .leading, spacing: 6) {
+            if !attachments.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack {
+                        ForEach(attachments) { a in
+                            HStack(spacing: 4) {
+                                Image(nsImage: a.thumbnail).resizable().scaledToFit().frame(width: 22, height: 22)
+                                Text(a.name).font(.caption).lineLimit(1)
+                                Button { attachments.removeAll { $0.id == a.id } } label: { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.borderless)
+                            }
+                            .padding(.horizontal, 6).padding(.vertical, 3)
+                            .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                        }
+                    }
+                }
+            }
+            if !attachError.isEmpty { Text(attachError).font(.caption).foregroundStyle(.red) }
+            HStack(alignment: .bottom) {
+            Button { pickFiles() } label: { Image(systemName: "paperclip").font(.title3) }
+                .buttonStyle(.borderless)
+                .help("Đính kèm file/ảnh (hoặc kéo thả, hoặc ⌘V ảnh/file đã copy)")
             TextEditor(text: $draft)
                 .font(.body)
                 .frame(minHeight: 44, maxHeight: 120)
@@ -126,13 +216,27 @@ struct ChatView: View {
             Button { sendDraft() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
             .buttonStyle(.borderless)
             .help("Gửi (↩) · xuống hàng: ⇧↩")
+            }
         }
         .padding(12)
+        .background(dropTargeted ? Color.accentColor.opacity(0.08) : .clear)
+        .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { providers in
+            for p in providers {
+                _ = p.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url else { return }
+                    DispatchQueue.main.async { add([.file(url)]) }
+                }
+            }
+            return true
+        }
+        .onAppear { installPasteMonitor() }
+        .onDisappear { if let m = pasteMonitor { NSEvent.removeMonitor(m) } }
     }
 }
 
 struct MessageRow: View {
     let m: Message
+    let root: URL
 
     var label: String {
         switch m.kind {
@@ -146,34 +250,60 @@ struct MessageRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(label).font(.caption.bold()).foregroundStyle(m.kind == .system ? Color.orange : .secondary)
-                Text(m.date, style: .time).font(.caption2).foregroundStyle(.tertiary)
+        let mine = m.kind == .user
+        HStack(alignment: .top) {
+            if mine { Spacer(minLength: 80) }
+            VStack(alignment: mine ? .trailing : .leading, spacing: 4) {
+                HStack {
+                    Text(label).font(.caption.bold()).foregroundStyle(m.kind == .system ? Color.orange : .secondary)
+                    Text(m.date, style: .time).font(.caption2).foregroundStyle(.tertiary)
+                }
+                VStack(alignment: .leading, spacing: 6) {
+                    if [.task, .callback, .handoff].contains(m.kind) && m.text.count > 600 {
+                        DisclosureGroup(String(m.text.prefix(160)) + "…") { body(m.text) }
+                    } else {
+                        body(m.text)
+                    }
+                    let images = Attachment.paths(in: m.text).compactMap { rel -> URL? in
+                        let u = root.appendingPathComponent(rel)
+                        return Attachment.isImage(u) ? u : nil
+                    }
+                    if !images.isEmpty {
+                        HStack {
+                            ForEach(images, id: \.self) { u in
+                                Link(destination: u) {
+                                    if let img = NSImage(contentsOf: u) {
+                                        Image(nsImage: img).resizable().scaledToFit().frame(maxWidth: 160, maxHeight: 120)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 12).fill(background))
             }
-            if [.task, .callback, .handoff].contains(m.kind) && m.text.count > 600 {
-                DisclosureGroup(String(m.text.prefix(160)) + "…") { body(m.text) }
-            } else {
-                body(m.text)
-            }
+            if !mine { Spacer(minLength: 40) }
         }
-        .padding(10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 10).fill(background))
+        .frame(maxWidth: .infinity)
     }
 
     func body(_ text: String) -> some View {
-        Text((try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text))
+        let md = linkifyPaths(text, root: root)
+        return Text((try? AttributedString(markdown: md, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text))
             .textSelection(.enabled)
             .font(m.kind == .assistant || m.kind == .user ? .body : .callout)
+            // Results relayed between agents are rarely read in full; keep them visually quiet.
+            .foregroundStyle(m.kind == .callback ? Color.secondary : .primary)
     }
 
     var background: Color {
         switch m.kind {
-        case .user: .accentColor.opacity(0.15)
+        case .user: .accentColor.opacity(0.18)
         case .assistant: Color.secondary.opacity(0.08)
         case .system: .orange.opacity(0.08)
-        default: .purple.opacity(0.08)
+        default: .purple.opacity(0.06)
         }
     }
 }

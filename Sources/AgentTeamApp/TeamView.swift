@@ -9,18 +9,50 @@ struct TeamView: View {
     @State private var bulkFrom: Provider = .claude
     @State private var bulkTo = Profile(.codex, "gpt-6.1-sol")
     @State private var newRoleName = ""
-    @State private var templateNote = ""
+    @State private var pendingSetup: (title: String, setup: TeamSetup)?
+    private var accounts: Accounts { Accounts.shared }
 
     var body: some View {
         Form {
             providers
+            presets
             agents
             bulk
             roles
             operations
-            template
         }
         .formStyle(.grouped)
+        .task { await accounts.refresh(o.team.binaryPaths) }
+        .confirmationDialog("Chuyển sang bộ \(pendingSetup?.title ?? "")?", isPresented: Binding(
+            get: { pendingSetup != nil }, set: { if !$0 { pendingSetup = nil } })) {
+            Button("Chuyển, bỏ thay đổi chưa lưu", role: .destructive) {
+                if let s = pendingSetup { o.applySetup(s.setup) }
+                pendingSetup = nil
+            }
+        } message: {
+            Text("Team hiện tại có thay đổi chưa lưu. Bấm \"Lưu Custom\" trước nếu muốn giữ lại.")
+        }
+    }
+
+    /// Green: signed in · orange: hit its limit · red: CLI missing or signed out · grey: off or not checked yet.
+    func statusColor(_ p: Provider) -> Color {
+        if o.team.disabledProviders.contains(p) { return .gray }
+        if o.team.limitedProviders.contains(p) { return .orange }
+        switch accounts.status[p]?.ok {
+        case true?: return .green
+        case false?: return .red
+        case nil: return .gray
+        }
+    }
+
+    func openTerminal(_ p: Provider, login: Bool) {
+        guard let bin = model.runner.binary(for: p, override: o.team.binaryPaths[p.rawValue]) else { return }
+        // A .command file opens in Terminal without asking for permission to control Terminal.
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-\(p.rawValue)-\(login ? "login" : "logout").command")
+        try? "#!/bin/zsh\n\(p.accountCommand(bin, login: login))\n".write(to: file, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
+        NSWorkspace.shared.open(file)
+        accounts.watch(p, o.team.binaryPaths)
     }
 
     var providers: some View {
@@ -28,11 +60,17 @@ struct TeamView: View {
             ForEach(Provider.allCases) { p in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
+                        Circle().fill(statusColor(p)).frame(width: 10, height: 10)
+                            .help(o.team.limitedProviders.contains(p) ? "Đang bị limit" : accounts.status[p]?.detail ?? "Đang kiểm tra…")
                         Text(p.title).bold()
                         if o.team.limitedProviders.contains(p) {
                             Button("Bỏ đánh dấu limit") { o.clearLimit(p) }
                             .tint(.orange)
                         }
+                        Spacer()
+                        Button("Login") { openTerminal(p, login: true) }
+                            .help("Mở Terminal để đăng nhập (đổi tài khoản: Logout rồi Login).")
+                        Button("Logout") { openTerminal(p, login: false) }
                         Spacer()
                         Toggle("Đang dùng", isOn: Binding(
                             get: { !o.team.disabledProviders.contains(p) },
@@ -71,6 +109,39 @@ struct TeamView: View {
         panel.canChooseDirectories = false
         panel.showsHiddenFiles = true
         if panel.runModal() == .OK, let url = panel.url { o.team.binaryPaths[p.rawValue] = url.path }
+    }
+
+    var presets: some View {
+        Section {
+            let current = o.team.preset
+            let dirty = current == nil && o.team.customSetup.map { !$0.sameShape(as: o.team.setup) } ?? true
+            HStack {
+                Picker("Bộ mẫu team", selection: Binding(
+                    get: { current?.rawValue ?? "custom" },
+                    set: { id in
+                        let target: (String, TeamSetup)?
+                        if let p = TeamPreset(rawValue: id) { target = (p.title, p.setup) }
+                        else { target = o.team.customSetup.map { ("Custom", $0) } }
+                        guard let target else { return }
+                        if dirty { pendingSetup = target } else { o.applySetup(target.1) }
+                    })) {
+                    ForEach(TeamPreset.allCases) { Text($0.title).tag($0.rawValue) }
+                    if o.team.customSetup != nil || current == nil {
+                        Text(dirty ? "Custom (chưa lưu)" : "Custom").tag("custom")
+                    }
+                }
+                .disabled(o.runningCount > 0)
+                Button("Lưu Custom") { o.team.customSetup = o.team.setup }
+                    .disabled(!dirty)
+                    .help("Lưu vai trò và vị trí hiện tại thành bản Custom của riêng dự án này.")
+            }
+            if o.runningCount > 0 {
+                Text("Đang có agent chạy; dừng hoặc chờ xong rồi mới đổi bộ mẫu.").font(.caption).foregroundStyle(.secondary)
+            }
+        } footer: {
+            Text("Chỉ áp dụng cho dự án này. Sửa vai trò/vị trí sẽ thành Custom; dự án khác không bị ảnh hưởng.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
 
     var agents: some View {
@@ -182,29 +253,6 @@ struct TeamView: View {
         }
     }
 
-    var template: some View {
-        Section("Mẫu team (dùng cho mọi dự án mới; từng dự án vẫn sửa riêng được)") {
-            HStack {
-                Button("Lưu team này làm mẫu mặc định") {
-                    do {
-                        try o.team.saveAsTemplate()
-                        templateNote = "Đã lưu. Dự án mới sẽ dùng team này."
-                    } catch {
-                        templateNote = "Không lưu được: \(error.localizedDescription)"
-                    }
-                }
-                Button("Áp dụng mẫu cho dự án này") {
-                    o.applyTemplate()
-                    templateNote = "Đã áp dụng mẫu."
-                }
-                .disabled(!o.chats.isEmpty)
-                .help(o.chats.isEmpty ? "Thay vai trò và vị trí bằng mẫu mặc định." : "Dự án đã có chat; xoá các chat trước để không chat nào mất agent.")
-                Spacer()
-                Text(templateNote).font(.caption).foregroundStyle(.secondary)
-            }
-        }
-    }
-
     var operations: some View {
         Section("Vận hành & tiết kiệm token") {
             Toggle("Tự động chuyển sang fallback khi bị limit (kèm gói bàn giao)", isOn: $o.team.autoFailover)
@@ -216,6 +264,38 @@ struct TeamView: View {
                 .help("Lead dùng con số này cho việc cần thảo luận. Bạn cũng có thể ghi riêng trong tin nhắn, ví dụ \"thảo luận 5 vòng\".")
             Stepper("Lượt tự động liên tiếp tối đa mỗi chat: \(o.team.maxAutoTurns)", value: $o.team.maxAutoTurns, in: 1...50)
             Stepper("Số lần giao việc tối đa mỗi lượt: \(o.team.maxDispatchPerTurn)", value: $o.team.maxDispatchPerTurn, in: 1...20)
+            Stepper("Coi là treo khi không có tín hiệu: \(o.team.stallMinutes ?? 20) phút",
+                    value: Binding(get: { o.team.stallMinutes ?? 20 }, set: { o.team.stallMinutes = $0 }), in: 5...120, step: 5)
+                .help("Agent không in ra gì trong thời gian này (thường do một lệnh/test chạy mãi) thì app dừng nó cùng các lệnh con, chạy lại một lần kèm cảnh báo; treo lần nữa thì báo lỗi. Rớt mạng thì tự thử lại khi có mạng.")
+        }
+    }
+}
+
+/// Sign-in state of each provider CLI; account-wide, so shared by all windows.
+@MainActor @Observable
+final class Accounts {
+    static let shared = Accounts()
+    var status: [Provider: AccountStatus] = [:]
+    @ObservationIgnored var watching: [Provider: Task<Void, Never>] = [:]
+
+    func refresh(_ paths: [String: String]) async {
+        for p in Provider.allCases {
+            status[p] = await AppModel.runner.accountStatus(p, override: paths[p.rawValue])
+        }
+    }
+
+    /// After Login/Logout opens Terminal: re-check every 5 s for 3 minutes so the light follows the sign-in.
+    func watch(_ p: Provider, _ paths: [String: String]) {
+        watching[p]?.cancel()
+        let before = status[p]
+        watching[p] = Task {
+            for _ in 0..<36 {
+                try? await Task.sleep(for: .seconds(5))
+                if Task.isCancelled { return }
+                let s = await AppModel.runner.accountStatus(p, override: paths[p.rawValue])
+                status[p] = s
+                if s.ok != before?.ok { return }
+            }
         }
     }
 }

@@ -54,7 +54,6 @@ try FileManager.default.createDirectory(at: tempQuotaDir, withIntermediateDirect
 Quota.fileOverride = tempQuotaDir.appendingPathComponent("quota.json")
 Quota.workDirOverride = tempQuotaDir.appendingPathComponent("agy-usage")
 Quota.codexSessionsOverride = tempQuotaDir.appendingPathComponent("codex_sessions")
-Team.templateFileOverride = tempQuotaDir.appendingPathComponent("template.json")
 
 // Built-in template: Planner and Critic on different providers, also after Claude is switched off.
 do {
@@ -169,7 +168,7 @@ do {
     let resSym = ProcessRunner.stopOrphans(paths)
     check(resSym.stopped == 1 && !symProc.isRunning, "orphan launched via symlink is verified and stopped")
 
-    // 5. Alive process with same startTime but path mismatch -> do NOT kill, mark unverified (blocks resume)
+    // 5. Same pid + start time but a different path (script CLIs run under node/bash) -> still ours, stopped
     let pOther = Process()
     pOther.executableURL = URL(fileURLWithPath: "/bin/sleep")
     pOther.arguments = ["30"]
@@ -178,8 +177,7 @@ do {
     let otherRec = RunningProcessRecord(pid: pOther.processIdentifier, startTimeSec: otherStart.0, startTimeUsec: otherStart.1, binary: "/usr/bin/unverified_other")
     try JSONEncoder().encode(["c_unverified": otherRec]).write(to: paths.runningFile)
     let resOther = ProcessRunner.stopOrphans(paths)
-    check(resOther.unverifiableChatIds.contains("c_unverified") && resOther.unverifiedChatIds.contains("c_unverified") && pOther.isRunning, "alive process with unverifiable path is NOT killed and marked unverifiable")
-    pOther.terminate()
+    check(resOther.stopped == 1 && resOther.unverifiedChatIds.isEmpty && !pOther.isRunning, "orphan under an interpreter (path differs, start time matches) is stopped")
 
     try? FileManager.default.removeItem(at: ws)
 }
@@ -309,6 +307,56 @@ do {
     dummyChat.messages.append(Message(.user, longInput))
     let pkg = Handoff.package(chat: dummyChat, role: nil, reason: "test", inputs: [Input(text: longInput, fromUser: true)], notes: nil, gitStatus: nil)
     check(pkg.contains(longInput), "input over 12k chars is NOT clipped in handoff package")
+}
+
+
+// Presets: recognised by shape, applying keeps chats attached, editing turns the team Custom.
+do {
+    var t = Team.starter()
+    check(t.preset == .standard, "starter is the standard preset")
+    let leadId = t.agents.first { $0.roleId == "lead" }!.id
+    t.apply(TeamPreset.design.setup)
+    check(t.preset == .design && t.agents.first { $0.roleId == "lead" }?.id == leadId, "design preset keeps the lead's agent id")
+    t.agents[1].profile.model = "x"
+    check(t.preset == nil, "edited preset becomes Custom")
+    t.customSetup = t.setup
+    check(t.customSetup?.sameShape(as: t.setup) == true && t.preset == nil, "custom setup saved per project")
+    for p in TeamPreset.allCases {
+        let s = p.setup
+        check(Set(s.agents.map(\.roleId)).isSubset(of: Set(s.roles.map(\.id))) && s.roles.filter(\.canDispatch).count == 1, "\(p) preset is consistent")
+    }
+}
+
+// File links, attachments, network errors, sign-in status parsing.
+do {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-links-\(shortId())")
+    try FileManager.default.createDirectory(at: root.appendingPathComponent(".agentteam/reports"), withIntermediateDirectories: true)
+    try "x".write(to: root.appendingPathComponent(".agentteam/reports/bao cao.md"), atomically: true, encoding: .utf8)
+    try "x".write(to: root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+    let md = linkifyPaths("Xem `.agentteam/reports/bao cao.md` và README.md:12, không phải e.g. hay github.com, [đã có](README.md).", root: root)
+    check(md.contains("[.agentteam/reports/bao cao.md](.agentteam/reports/bao%20cao.md)"), "backticked path with space becomes a link")
+    check(md.contains("[README.md:12](README.md%3A12)") && !md.contains("[github.com]") && md.contains("[đã có](README.md)"), "bare existing path linked, others untouched")
+    check(resolveLocal(URL(string: "README.md:12")!, root: root)?.lastPathComponent == "README.md", "line suffix ignored when resolving")
+    check(resolveLocal(URL(string: "https://example.com/a.md")!, root: root) == nil, "web links are not local files")
+    check(Attachments.paths(in: "hi\n\n\(Attachments.marker)\n- a/b.png\n- c.pdf") == ["a/b.png", "c.pdf"], "attachment paths parsed")
+    check(isNetworkError("TypeError: fetch failed (getaddrinfo ENOTFOUND api.openai.com)") && !isNetworkError("usage limit reached"), "network errors detected")
+    check(Provider.claude.parseStatus(exit: 0, output: #"{"loggedIn": true, "email": "a@b.c"}"#) == AccountStatus(ok: true, detail: "a@b.c"), "claude status parsed")
+    check(Provider.codex.parseStatus(exit: 1, output: "Not logged in").ok == false, "codex signed out")
+    check(Provider.antigravity.parseStatus(exit: 0, output: "gemini-4-argon-high\tGemini").ok == true, "agy signed in")
+    try? FileManager.default.removeItem(at: root)
+}
+
+// Hung command: the whole process tree is stopped.
+do {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/sh")
+    p.arguments = ["-c", "sleep 60 & wait"]
+    try p.run()
+    usleep(300_000)
+    let kids = ProcessRunner.descendantsForChecks(of: p.processIdentifier)
+    ProcessRunner.terminateTree(p.processIdentifier)
+    usleep(500_000)
+    check(kids.count == 1 && kids.allSatisfy { kill($0, 0) != 0 } && !p.isRunning, "terminateTree stops the CLI and its child command")
 }
 
 // Orchestrator flow with a fake runner
@@ -612,7 +660,64 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     o.releaseLock()
 }
 
+
+// Watchdog: a silent turn is stopped, retried once with a warning, then failed.
+@MainActor func stallScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-stall-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var prompts: [String] = []
+    var cancelled = false
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        prompts.append(req.prompt)
+        cancelled = false
+        emit(.progress("run_command FaultProbe"))
+        for _ in 0..<400 where !cancelled { try? await Task.sleep(nanoseconds: 5_000_000) }
+        return "exit 15"
+    }
+    o.cancelTurn = { _ in cancelled = true }
+    o.gitStatus = { _ in nil }
+    let worker = o.team.agents.first { $0.roleId == "worker" }!
+    o.team.agents[o.team.agents.firstIndex { $0.id == worker.id }!].profile = Profile(.claude, "sonnet")
+    let c = o.newChat(agentId: worker.id, title: "w")
+    o.send("chạy test", to: c)
+    for _ in 0..<100 where prompts.count < 1 { try? await Task.sleep(nanoseconds: 5_000_000) }
+    o.checkStalls(now: Date().addingTimeInterval(3600))
+    for _ in 0..<200 where prompts.count < 2 { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(prompts.count == 2 && prompts[1].contains("Lượt trước bị dừng") && prompts[1].contains("run_command FaultProbe"), "stalled turn retried once with the hung step named")
+    o.checkStalls(now: Date().addingTimeInterval(3600))
+    for _ in 0..<200 where o.chat(c)?.status != .failed { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(o.chat(c)?.status == .failed && prompts.count == 2, "second stall fails the chat instead of looping")
+    o.stopInboxPolling()
+    try? FileManager.default.removeItem(at: dir)
+}
+
+// Network drop: the turn waits and retries instead of failing the work.
+@MainActor func networkScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-net-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var runs = 0
+    let o = try Orchestrator(workspace: dir) { _, _, _, emit in
+        runs += 1
+        if runs == 1 { return "exit 1: TypeError: fetch failed (getaddrinfo ENOTFOUND api.openai.com)" }
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    let worker = o.team.agents.first { $0.roleId == "worker" }!
+    o.team.agents[o.team.agents.firstIndex { $0.id == worker.id }!].profile = Profile(.claude, "sonnet")
+    let c = o.newChat(agentId: worker.id, title: "w")
+    o.send("việc", to: c)
+    for _ in 0..<100 where o.retryAt[c] == nil { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(o.retryAt[c] != nil && o.chat(c)?.status == .queued && runs == 1 && o.chat(c)?.pending.count == 1, "network failure waits with work kept")
+    o.retryNow(c)
+    for _ in 0..<200 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(o.chat(c)?.status == .done && runs == 2, "retry after network is back finishes the work")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await stallScenario()
+try await networkScenario()
 try await suspendScenario()
 try await firstTurnLimitScenario()
 try await resumeTupleScenario()

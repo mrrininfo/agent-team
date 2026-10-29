@@ -216,3 +216,12 @@ public func isLimitError(_ text: String) -> Bool {
 
     return false
 }
+
+/// Connection failures: the turn is retried once the network is back instead of failing the work.
+public func isNetworkError(_ text: String) -> Bool {
+    let t = text.lowercased()
+    return ["enotfound", "econnreset", "econnrefused", "etimedout", "eai_again", "enetunreach", "network error",
+            "network is unreachable", "could not resolve host", "getaddrinfo", "connection reset", "connection refused",
+            "stream disconnected", "socket hang up", "fetch failed", "error sending request", "internet connection appears to be offline",
+            "unable to connect", "dns error", "tls handshake"].contains { t.contains($0) }
+}
