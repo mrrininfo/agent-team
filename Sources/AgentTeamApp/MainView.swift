@@ -14,8 +14,16 @@ struct MainView: View {
     @State private var selection: Selection? = .team
     @State private var confirmDelete = false
     @State private var preview = PreviewState()
+    @State private var nameDraft = ""
+    @FocusState private var editingName: Bool
 
     var displayName: String { o.team.name ?? o.paths.workspace.lastPathComponent }
+
+    func saveName() {
+        let n = nameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        o.team.name = n.isEmpty || n == o.paths.workspace.lastPathComponent ? nil : n
+        nameDraft = displayName
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -24,10 +32,13 @@ struct MainView: View {
                     HStack(spacing: 6) {
                         Image(systemName: "folder.fill").foregroundStyle(Color.accentColor)
                         // Display name only: the folder on disk is not renamed (running agents work inside it).
-                        TextField("", text: Binding(get: { displayName },
-                                                    set: { o.team.name = $0.isEmpty || $0 == o.paths.workspace.lastPathComponent ? nil : $0 }),
-                                  prompt: Text(o.paths.workspace.lastPathComponent))
+                        // Edits a draft and saves on Enter/leaving the field, so clearing it does not snap back to the old name.
+                        TextField("", text: $nameDraft, prompt: Text(o.paths.workspace.lastPathComponent))
                             .textFieldStyle(.plain).font(.headline)
+                            .focused($editingName)
+                            .onSubmit { saveName() }
+                            .onChange(of: editingName) { if !editingName { saveName() } }
+                            .onAppear { nameDraft = displayName }
                             .help("Bấm để đổi tên hiển thị của dự án (thư mục trên ổ đĩa giữ nguyên)")
                     }
                     Text(o.paths.workspace.path).font(.caption2).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)

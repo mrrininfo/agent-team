@@ -259,11 +259,15 @@ struct MessageRow: View {
                     Text(m.date, style: .time).font(.caption2).foregroundStyle(.tertiary)
                 }
                 VStack(alignment: .leading, spacing: 6) {
-                    if [.task, .callback, .handoff].contains(m.kind) && m.text.count > 600 {
-                        DisclosureGroup(String(m.text.prefix(160)) + "…") { body(m.text) }
-                    } else {
-                        body(m.text)
+                    Group {
+                        if [.task, .callback, .handoff].contains(m.kind) && m.text.count > 600 {
+                            DisclosureGroup(String(m.text.prefix(160)) + "…") { body(m.text) }
+                        } else {
+                            body(m.text)
+                        }
                     }
+                    // Results relayed between agents are rarely read in full; keep them (and their collapsed preview) quiet.
+                    .foregroundStyle(m.kind == .callback ? Color.secondary : .primary)
                     let images = Attachment.paths(in: m.text).compactMap { rel -> URL? in
                         let u = root.appendingPathComponent(rel)
                         return Attachment.isImage(u) ? u : nil
@@ -294,8 +298,6 @@ struct MessageRow: View {
         return Text((try? AttributedString(markdown: md, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text))
             .textSelection(.enabled)
             .font(m.kind == .assistant || m.kind == .user ? .body : .callout)
-            // Results relayed between agents are rarely read in full; keep them visually quiet.
-            .foregroundStyle(m.kind == .callback ? Color.secondary : .primary)
     }
 
     var background: Color {

@@ -55,16 +55,15 @@ Quota.fileOverride = tempQuotaDir.appendingPathComponent("quota.json")
 Quota.workDirOverride = tempQuotaDir.appendingPathComponent("agy-usage")
 Quota.codexSessionsOverride = tempQuotaDir.appendingPathComponent("codex_sessions")
 
-// Built-in template: Planner and Critic on different providers, also after Claude is switched off.
+// Built-in template: the user's chosen roles/providers; Planner and Critic stay on different model families.
 do {
     var t = Team.starter()
     check(Set(t.roles.map(\.id)) == ["lead", "planner", "critic", "worker", "testing"], "template roles")
     func provider(_ role: String) -> Provider? { t.agents.first { $0.roleId == role }.flatMap(t.effectiveProfile)?.provider }
     check(provider("planner") != provider("critic"), "planner/critic differ")
+    check(provider("worker") == .antigravity && t.maxConcurrent == 5 && t.debateRounds == 3 && t.maxAutoTurns == 30, "starter settings")
     t.disabledProviders = [.claude]
-    let p = t.agents.first { $0.roleId == "planner" }.flatMap(t.effectiveProfile)
-    check(p?.provider == .antigravity && p?.model.hasPrefix("claude") == true, "planner keeps a Claude model via Antigravity")
-    check(provider("planner") != provider("critic"), "planner/critic still differ without Claude")
+    check(provider("planner") == .codex && provider("testing") == .antigravity, "Claude off: planner/testing fall back")
 }
 
 // Older team.json without newer optional fields still decodes (no reset to template).

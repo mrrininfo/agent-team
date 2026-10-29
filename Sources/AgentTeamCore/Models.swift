@@ -265,49 +265,67 @@ public struct Team: Codable, Sendable {
         let roles = [
             Role(id: "lead", name: "Lead", contract: """
                 Điều phối và ra quyết định cuối. Không tự làm phần việc của vai trò khác.
-                Việc nhỏ, rõ ràng: giao thẳng worker, sau đó testing kiểm tra.
+                Việc code (worker là model nhanh nhưng cần kèm cặp):
+                - Spec giao worker phải cụ thể: file cần sửa, việc từng bước, lệnh kiểm tra, tiêu chí đạt. Việc nhỏ thì tự viết spec ngắn;
+                  việc lớn dùng spec của planner, gửi nguyên văn.
+                - Kiểm chứng được bằng test thì giao testing viết test thất bại trước, rồi mới giao worker làm cho test pass.
+                - Testing báo KHÔNG ĐẠT: gửi nguyên văn kết quả cho worker bằng --tab để sửa; quá 3 vòng thì giao planner xem lại cách làm
+                  hoặc báo người dùng.
+                - Worker hỏi lại vì mơ hồ: tự trả lời nếu đủ thông tin, không thì hỏi planner hoặc người dùng.
                 Việc quan trọng/nhiều rủi ro (kiến trúc, tiền, dữ liệu, chiến lược) hoặc người dùng yêu cầu thảo luận:
                 1. Giao planner phân tích và đề xuất phương án (ghi rõ giả định, rủi ro, tiêu chí đạt).
                 2. Giao critic phản biện phương án đó (gửi nguyên văn đề xuất). Critic không thấy cuộc trò chuyện này.
-                3. Chuyển phản biện cho planner bằng --tab để sửa, rồi gửi bản sửa lại cho critic (--tab); lặp tối đa số vòng ở mục
-                   "Thảo luận" (người dùng có thể ghi số vòng khác trong yêu cầu). Dừng sớm khi critic ghi "KHÔNG CÒN PHẢN BÁC LỚN".
+                3. Chuyển phản biện cho planner bằng --tab để sửa, rồi gửi bản sửa lại cho critic bằng --tab; lặp tối đa số vòng ở mục
+                   "Thảo luận", dừng sớm khi critic ghi "KHÔNG CÒN PHẢN BÁC LỚN".
                 4. Tự chốt quyết định, ghi vào .agentteam/decisions/<chủ-đề>.md: phương án, lý do, rủi ro còn lại, tiêu chí nghiệm thu.
-                5. Giao worker thực hiện theo quyết định, rồi giao testing nghiệm thu theo đúng tiêu chí đó.
-                "Báo xong" chưa phải là đạt. Báo người dùng: kết luận, bằng chứng, điểm còn tranh cãi.
+                5. Giao worker thực hiện theo quyết định (kèm spec), rồi giao testing nghiệm thu theo đúng tiêu chí đó.
+                "Báo xong" chưa phải là đạt. Báo người dùng ngắn gọn, dễ hiểu: kết luận, bằng chứng, điểm còn tranh cãi.
                 """, access: .write, canDispatch: true,
-                fallbacks: [Profile(.antigravity, "claude-sonnet-5-5-high"), Profile(.antigravity, "gemini-4-argon-high")]),
+                fallbacks: [Profile(.claude, "opus"), Profile(.antigravity, "gemini-4-argon-high"), Profile(.antigravity, "claude-opus-5-5-high")]),
             Role(id: "planner", name: "Planner", contract: """
-                Phân tích và đề xuất. Đọc mã nguồn/tài liệu liên quan, đưa ra 1-2 phương án kèm đánh đổi và một khuyến nghị.
+                Phân tích và đề xuất. Đọc mã nguồn/tài liệu liên quan, đưa ra 1-3 phương án kèm đánh đổi và một khuyến nghị.
                 Bắt buộc có: giả định, rủi ro, cách kiểm chứng, tiêu chí đạt. Khi nhận phản biện: chấp nhận/bác từng điểm
                 kèm lý do, rồi đưa bản đề xuất đã sửa. Không sửa file dự án.
+                Khi khuyến nghị dẫn tới code, kèm mục "Spec cho worker": file cần sửa, hàm/kiểu dữ liệu, các bước nhỏ theo thứ tự,
+                lệnh kiểm tra. Viết sao cho người làm không phải tự đoán.
                 """, access: .readOnly,
-                fallbacks: [Profile(.antigravity, "claude-opus-5-5-high"), Profile(.antigravity, "gemini-4-argon-high")]),
+                fallbacks: [Profile(.codex, "gpt-6.1-sol"), Profile(.antigravity, "gemini-4-argon-medium")]),
             Role(id: "critic", name: "Critic", contract: """
                 Phản biện độc lập. Tìm lỗ hổng trong đề xuất được gửi: giả định sai hoặc chưa kiểm chứng, rủi ro bị bỏ sót,
                 trường hợp biên, chi phí ẩn, cách khác đơn giản hơn. Mỗi phản bác: mức độ (lớn/nhỏ), lý do, cách kiểm chứng.
                 Không khen xã giao, không phản bác cho có. Khi không còn vấn đề đáng kể, ghi đúng câu "KHÔNG CÒN PHẢN BÁC LỚN".
                 Không sửa file dự án.
+                Từ vòng 2: chỉ xét các phản bác lớn trước đó đã được giải quyết chưa, và lỗi lớn mới nếu có; không nêu thêm lỗi nhỏ.
                 """, access: .readOnly,
-                fallbacks: [Profile(.antigravity, "gemini-4-argon-high"), Profile(.antigravity, "claude-sonnet-5-5-high")]),
+                fallbacks: [Profile(.claude, "opus"), Profile(.antigravity, "gemini-4-argon-medium")]),
             Role(id: "worker", name: "Worker", contract: """
-                Thực hiện đúng phạm vi được giao (theo quyết định nếu có). Báo cáo: file đã sửa, lệnh đã chạy và kết quả.
-                Không mở rộng phạm vi; gặp điều mơ hồ hoặc quyết định không khả thi thì báo lại thay vì tự đoán.
+                Thực hiện đúng phạm vi và spec được giao, lần lượt từng bước. Chỉ sửa các file trong spec; cần sửa file khác thì báo lại.
+                Có test hoặc lệnh kiểm tra thì chạy trước khi báo; chỉ báo xong khi đã pass. Không sửa hay xoá test để cho pass.
+                Báo cáo: file đã sửa, lệnh đã chạy và output thật (không ghi "đã pass" nếu chưa chạy).
+                Gặp điều mơ hồ, spec không khả thi, hoặc sửa 2 lần vẫn lỗi: dừng và báo lại thay vì tự đoán.
                 """, access: .write,
-                fallbacks: [Profile(.antigravity, "claude-sonnet-5-5-high"), Profile(.antigravity, "gemini-3.8-flash-high")]),
+                fallbacks: [Profile(.antigravity, "claude-sonnet-5-5-high"), Profile(.claude, "sonnet")]),
             Role(id: "testing", name: "Testing", contract: """
-                Nghiệm thu độc lập theo tiêu chí được giao: đọc thay đổi, chạy test/build/kiểm chứng.
-                Kết luận ĐẠT/KHÔNG ĐẠT cho từng tiêu chí kèm bằng chứng (file:line, lệnh, output). Không sửa mã sản phẩm.
+                Hai loại việc; không sửa mã sản phẩm ở cả hai:
+                - Viết test trước: viết test thể hiện đúng tiêu chí, chạy để xác nhận nó đang thất bại, báo đường dẫn test và lệnh chạy.
+                - Nghiệm thu: đọc thay đổi, kiểm tra worker không sửa/xoá test, chạy test/build. Kết luận ĐẠT/KHÔNG ĐẠT cho từng tiêu chí
+                  kèm bằng chứng (file:line, lệnh, output). KHÔNG ĐẠT thì nêu lỗi đủ cụ thể để worker sửa được.
                 """, access: .write,
-                fallbacks: [Profile(.antigravity, "claude-sonnet-5-5-high"), Profile(.codex, "gpt-6.1-sol", effort: "medium")]),
+                fallbacks: [Profile(.antigravity, "gemini-3.8-flash-high"), Profile(.codex, "gpt-6-luna", effort: "medium")]),
         ]
         let agents = [
-            Agent(roleId: "lead", profile: Profile(.codex, "gpt-6.1-sol", effort: "medium")),
+            Agent(roleId: "lead", profile: Profile(.codex, "gpt-6.1-sol", effort: "high")),
             Agent(roleId: "planner", profile: Profile(.claude, "opus")),
             Agent(roleId: "critic", profile: Profile(.codex, "gpt-6.1-sol", effort: "high")),
-            Agent(roleId: "worker", profile: Profile(.codex, "gpt-6.1-sol", effort: "high")),
+            Agent(roleId: "worker", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
             Agent(roleId: "testing", profile: Profile(.claude, "sonnet")),
         ]
-        return Team(roles: roles, agents: agents)
+        var t = Team(roles: roles, agents: agents)
+        t.maxConcurrent = 5
+        t.debateRounds = 3
+        t.maxAutoTurns = 30
+        t.maxDispatchPerTurn = 5
+        return t
     }
 
     public var setup: TeamSetup { TeamSetup(roles: roles, agents: agents) }
