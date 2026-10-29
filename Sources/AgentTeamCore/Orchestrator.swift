@@ -398,6 +398,9 @@ public final class Orchestrator {
             ## Giao việc
             - Giao việc mới: chạy lệnh shell `agentteam dispatch --from \(chat.id) --to <agentId|role> --new-task "<tiêu đề>" "<nội dung>"`.
             - Tiếp tục chat cũ của agent: thay `--new-task "<tiêu đề>"` bằng `--tab <chatId>`.
+            - Không tự chạy `claude`, `codex`, `agy` hay tự làm thay phần việc của vai trò khác (kể cả khi họ lỗi/limit):
+              app tự chuyển provider dự phòng theo đúng thứ tự cài đặt và tự thử lại khi lỗi mạng, việc hiện trong tab của vai trò đó.
+              Vai trò báo lỗi thì giao lại bằng `--tab <chatId>` của họ.
             - Chỉ viết "sẽ giao" KHÔNG tạo nhiệm vụ; phải chạy lệnh. Mỗi lượt tối đa \(team.maxDispatchPerTurn) lần giao.
             - Nội dung giao phải tự đủ: phạm vi, đầu ra, bằng chứng cần báo cáo (agent nhận không thấy cuộc trò chuyện này).
             - ACK `queued/started` chỉ là đã xếp hàng. Giao xong thì kết thúc lượt; kết quả tự gửi về chat này.
@@ -642,7 +645,7 @@ public final class Orchestrator {
             $0.pending = $0.inFlight + $0.pending
             $0.inFlight = []
             $0.status = .queued
-            $0.messages.append(Message(.system, "Mất kết nối (\(reason)). Tự thử lại sau \(Int(delay)) giây, hoặc ngay khi có mạng (lần \(n + 1)/\(Self.netBackoff.count))."))
+            $0.messages.append(Message(.system, "Lỗi kết nối/máy chủ tạm thời (\(reason)). Việc được giữ; tự thử lại sau \(Int(delay)) giây, hoặc ngay khi có mạng (lần \(n + 1)/\(Self.netBackoff.count))."))
         }
         recordHealth()
         pump()

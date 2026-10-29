@@ -64,6 +64,13 @@ do {
     check(provider("worker") == .antigravity && t.maxConcurrent == 5 && t.debateRounds == 3 && t.maxAutoTurns == 30, "starter settings")
     t.disabledProviders = [.claude]
     check(provider("planner") == .codex && provider("testing") == .antigravity, "Claude off: planner/testing fall back")
+    t.disabledProviders = []
+    t.limitedProviders = [.claude]
+    check(t.agents.first { $0.roleId == "testing" }.flatMap(t.effectiveProfile) == Profile(.antigravity, "gemini-3.8-flash-high"),
+          "limited Testing uses fallback #1 first")
+    t.limitedProviders = [.claude, .antigravity]
+    check(t.agents.first { $0.roleId == "testing" }.flatMap(t.effectiveProfile) == Profile(.codex, "gpt-6-luna", effort: "medium"),
+          "then fallback #2")
 }
 
 // Older team.json without newer optional fields still decodes (no reset to template).
@@ -353,6 +360,15 @@ do {
     check(resolveLocal(URL(string: "https://example.com/a.md")!, root: root) == nil, "web links are not local files")
     check(Attachments.paths(in: "hi\n\n\(Attachments.marker)\n- a/b.png\n- c.pdf") == ["a/b.png", "c.pdf"], "attachment paths parsed")
     check(isNetworkError("TypeError: fetch failed (getaddrinfo ENOTFOUND api.openai.com)") && !isNetworkError("usage limit reached"), "network errors detected")
+    check(isNetworkError(#"API error (attempt 1): request failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse": EOF"#),
+          "agy dropped stream is retried")
+    let guardDir = ProcessRunner.dispatcherGuardForChecks()
+    let stub = Process()
+    stub.executableURL = guardDir?.appendingPathComponent("codex")
+    stub.standardError = FileHandle.nullDevice
+    try? stub.run()
+    stub.waitUntilExit()
+    check(stub.terminationStatus == 64, "dispatchers cannot launch provider CLIs directly")
     check(Provider.claude.parseStatus(exit: 0, output: #"{"loggedIn": true, "email": "a@b.c"}"#) == AccountStatus(ok: true, detail: "a@b.c"), "claude status parsed")
     check(Provider.codex.parseStatus(exit: 1, output: "Not logged in").ok == false, "codex signed out")
     check(Provider.antigravity.parseStatus(exit: 0, output: "gemini-4-argon-high\tGemini").ok == true, "agy signed in")

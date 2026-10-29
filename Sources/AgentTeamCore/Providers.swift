@@ -219,13 +219,17 @@ public func isLimitError(_ text: String) -> Bool {
     return false
 }
 
-/// Connection failures: the turn is retried once the network is back instead of failing the work.
+/// Connection and transient server failures (dropped stream, EOF, overloaded): the turn is retried with back-off
+/// instead of failing the work.
 public func isNetworkError(_ text: String) -> Bool {
     let t = text.lowercased()
     return ["enotfound", "econnreset", "econnrefused", "etimedout", "eai_again", "enetunreach", "network error",
             "network is unreachable", "could not resolve host", "getaddrinfo", "connection reset", "connection refused",
             "stream disconnected", "socket hang up", "fetch failed", "error sending request", "internet connection appears to be offline",
-            "unable to connect", "dns error", "tls handshake"].contains { t.contains($0) }
+            "unable to connect", "dns error", "tls handshake",
+            // agy: `API error (attempt 1): request failed: Post "https://…googleapis.com/…": EOF`
+            "request failed", "unexpected eof", "\": eof", "connection closed", "server disconnected",
+            "overloaded", "service unavailable", "bad gateway", "gateway timeout"].contains { t.contains($0) }
 }
 
 /// When a limit message says the limit resets, e.g. Claude's "resets 12:50am (Asia/Saigon)" or "resets Nov 2, 9am".

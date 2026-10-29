@@ -243,6 +243,32 @@ public final class ProcessRunner {
         return OrphanCleanupResult(stopped: stopped, legacyChatIds: [], unverifiableChatIds: unverifiable)
     }
 
+    nonisolated public static func dispatcherGuardForChecks() -> URL? { dispatcherGuard() }
+
+    nonisolated static func dispatcherGuard() -> URL? {
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AgentTeam/dispatcher-guard")
+        let script = """
+            #!/bin/sh
+            echo "Vai trò điều phối không tự chạy agent. Giao việc: agentteam dispatch --to <vai trò> (--new-task \"…\" | --tab <chatId>) \"…\". App tự chọn provider/fallback và hiện tiến trình trong tab của vai trò đó." >&2
+            exit 64
+
+            """
+        do {
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            for p in Provider.allCases {
+                let f = dir.appendingPathComponent(p.binaryName)
+                if (try? String(contentsOf: f, encoding: .utf8)) != script {
+                    try script.write(to: f, atomically: true, encoding: .utf8)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
+                }
+            }
+            return dir
+        } catch {
+            return nil
+        }
+    }
+
     /// `binaryPath` is the workspace's custom path for this provider, if any (several workspaces share one runner).
     public func run(chatId: String, request: TurnRequest, cwd: URL, binaryPath: String? = nil,
                     onEvent: @escaping @MainActor (RunEvent) -> Void) async -> String? {
@@ -255,7 +281,10 @@ public final class ProcessRunner {
         proc.arguments = provider.arguments(request)
         proc.currentDirectoryURL = cwd
         var env = ProcessInfo.processInfo.environment
-        env["PATH"] = ([helperDir?.path].compactMap { $0 } + [searchPath]).joined(separator: ":")
+        // Dispatchers get stub provider commands first on PATH: work for other roles must go through
+        // `agentteam dispatch`, where it is visible in that role's tab and uses its configured fallbacks.
+        let guardDir = request.canDispatch ? Self.dispatcherGuard() : nil
+        env["PATH"] = ([guardDir?.path, helperDir?.path].compactMap { $0 } + [searchPath]).joined(separator: ":")
         env["AGENTTEAM_CHAT"] = chatId
         env["AGENTTEAM_DIR"] = TeamPaths(workspace: cwd).root.path
         proc.environment = env
