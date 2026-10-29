@@ -120,6 +120,14 @@ do {
     try? FileManager.default.removeItem(at: home)
 }
 
+// A quota window past its reset time shows as empty until the provider reports again.
+do {
+    let q = ProviderQuota(windows: [QuotaWindow(name: "5 giờ", usedPercent: 100, resetsAt: Date().addingTimeInterval(-60)),
+                                    QuotaWindow(name: "7 ngày", usedPercent: 60, resetsAt: Date().addingTimeInterval(3600))], updated: Date())
+    let r = q.resettingExpired()
+    check(r.windows[0].usedPercent == 0 && r.windows[1].usedPercent == 60, "expired window reset, current one kept")
+}
+
 // Antigravity /usage panel scraping (text as captured from the TUI, ANSI codes included).
 do {
     let raw = "\u{1b}[2K GEMINI MODELS\r\n  Models within this group: Gemini Flash\r\n  Weekly Limit Remaining\r\n    [\u{1b}[32m███░░\u{1b}[0m] 67.74%\r\nRefreshes in 116h 24m\r\n  Five Hour Limit Remaining\r\n[███] 97.27%\r\nRefreshes in 2h 19m\r\n74%\r\nCLAUDE AND GPT MODELS\r\n  Weekly Limit Remaining\r\n[██░] 49.49%\r\nRefreshes in 116h 45m\r\n  Five Hour Limit Remaining\r\n[███] 100.00%\r\n  Gemini 4 Argon Weekly Limit\r\n[███] 99.73%\r\nRefreshes in 166h 10m\r\n"

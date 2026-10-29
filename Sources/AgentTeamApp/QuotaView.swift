@@ -24,7 +24,7 @@ struct QuotaBar: View {
                                 ProgressView(value: min(max(w.usedPercent, 0), 100), total: 100)
                                     .tint(quotaColor(w.usedPercent)).frame(width: 46)
                                 Text("\(Int(w.usedPercent.rounded()))%").font(.caption2.monospacedDigit())
-                                    .foregroundStyle(quotaColor(w.usedPercent))
+                                    .foregroundStyle(quotaColor(w.usedPercent)).lineLimit(1).fixedSize()
                             }
                         }
                     } else {

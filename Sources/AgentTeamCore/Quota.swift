@@ -16,6 +16,22 @@ public struct QuotaWindow: Codable, Hashable, Sendable {
 public struct ProviderQuota: Codable, Hashable, Sendable {
     public var windows: [QuotaWindow]
     public var updated: Date
+
+    public init(windows: [QuotaWindow], updated: Date) {
+        self.windows = windows
+        self.updated = updated
+    }
+
+    /// A window whose reset time has passed is empty again, even before the provider reports new usage
+    /// (Claude only reports during a turn).
+    public func resettingExpired(now: Date = Date()) -> ProviderQuota {
+        var q = self
+        for i in q.windows.indices where q.windows[i].resetsAt.map({ $0 <= now }) == true {
+            q.windows[i].usedPercent = 0
+            q.windows[i].resetsAt = nil
+        }
+        return q
+    }
 }
 
 public enum QuotaStatus: Equatable, Sendable {

@@ -794,6 +794,7 @@ public final class Orchestrator {
         guard !isInstallCheck else { return }
         var q = Quota.load()
         if let c = Quota.readCodex() { q[Provider.codex.rawValue] = c }
+        q = q.mapValues { $0.resettingExpired() }
         quotas = q
         Quota.save(q)
         refreshAntigravityQuota(force: force)
