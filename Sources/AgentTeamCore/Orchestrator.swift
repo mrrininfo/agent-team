@@ -436,6 +436,7 @@ public final class Orchestrator {
             - Đồ thị chỉ để định hướng: đọc file thật trước khi sửa hay kết luận.
             """
         }
+        s += glossarySection(role)
         s += """
 
 
@@ -668,6 +669,32 @@ public final class Orchestrator {
         }
         recordHealth()
         pump()
+    }
+
+    // MARK: - Glossary
+
+    /// Shared project vocabulary (`GLOSSARY.md` at the workspace root): one short term replaces a long description
+    /// in every report, task and name, so agents spend fewer tokens explaining. Writers keep it current.
+    func glossarySection(_ role: Role) -> String {
+        let text = (try? String(contentsOf: paths.glossaryFile, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        var s = """
+
+
+        ## Thuật ngữ dự án (GLOSSARY.md)
+        - Dùng đúng thuật ngữ đã định nghĩa khi viết báo cáo, giao việc, đặt tên hàm/file/biến; không diễn giải lại dài dòng.
+        """
+        s += role.access == .write
+            ? """
+
+            - Gặp khái niệm của dự án được nhắc nhiều lần mà chưa có tên ngắn: thêm một dòng `- **Thuật ngữ**: định nghĩa một câu`
+              vào `GLOSSARY.md` ở gốc workspace (tạo file nếu chưa có); sửa dòng đã sai. Chỉ khái niệm nghiệp vụ, không ghi chi tiết code; giữ dưới ~60 dòng.
+            """
+            : """
+
+            - Bạn không ghi file: thuật ngữ mới cần thêm thì ghi ở cuối báo cáo, mục "Thuật ngữ đề xuất".
+            """
+        if !text.isEmpty { s += "\n\nNội dung hiện tại:\n" + clip(text, 4000) }
+        return s
     }
 
     // MARK: - Code graph

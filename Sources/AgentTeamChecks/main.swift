@@ -993,7 +993,28 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// Glossary: every role gets the shared terms; writers maintain the file, read-only roles propose terms
+@MainActor func glossaryScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-gloss-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var prompts: [String] = []
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in prompts.append(req.prompt); emit(.final("ok")); return nil }
+    o.gitStatus = { _ in nil }
+    try "- **Nến chốt**: nến đã đóng, dùng cho tín hiệu.".write(to: TeamPaths(workspace: dir).glossaryFile, atomically: true, encoding: .utf8)
+    for roleId in ["worker", "critic"] {
+        let a = o.team.agents.first { $0.roleId == roleId }!
+        let c = o.newChat(agentId: a.id, title: roleId)
+        o.send("x", to: c)
+        for _ in 0..<300 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    }
+    check(prompts.count == 2 && prompts.allSatisfy { $0.contains("**Nến chốt**") }, "glossary content reaches every role")
+    check(prompts[0].contains("tạo file nếu chưa có") && prompts[1].contains("Thuật ngữ đề xuất"),
+          "writers maintain GLOSSARY.md, read-only roles propose terms")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await glossaryScenario()
 try await graphScenario()
 try await compactScenario()
 try await outputCapScenario()

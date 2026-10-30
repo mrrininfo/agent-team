@@ -50,6 +50,12 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
     tự gửi lại worker sửa, mặc định 3 vòng, đổi bằng `--rounds N`). Lead chỉ nhận kết quả cuối.
 11. **Đo thời gian**: đầu mỗi chat hiện thời gian tới tín hiệu đầu (khởi động CLI) và tổng của lượt cuối;
     mọi lượt được ghi vào `.agentteam/logs/turns.csv`.
+12. **Tự nén context**: vượt ngưỡng (mặc định 50%, chỉnh trong Vận hành) thì giữa hai lượt Claude chạy `/compact` ngầm,
+    Codex tự nén theo ngưỡng, Antigravity mở phiên mới kèm gói bàn giao.
+13. **Bản đồ code (graphify)**: nếu đã cài `graphify`, app tự dựng/cập nhật `graphify-out/` (cục bộ, không LLM) khi mở dự án
+    và sau mỗi lượt có sửa file; agent hỏi đồ thị (`graphify query/explain/path`) trước khi grep.
+14. **Thuật ngữ chung**: `GLOSSARY.md` ở gốc dự án được gửi cho mọi vai trò; vai trò được ghi tự thêm thuật ngữ mới,
+    vai trò chỉ đọc đề xuất ở cuối báo cáo. Bạn có thể tự sửa file này bất cứ lúc nào.
 
 ## Tiết kiệm token
 - Toolbar hiện tổng token, header của mỗi chat hiện token riêng (input không cache + output).
