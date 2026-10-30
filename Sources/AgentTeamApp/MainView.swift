@@ -55,9 +55,9 @@ struct MainView: View {
                 .padding(.vertical, 4)
                 NavigationLink(value: Selection.team) { Label("Team & Provider", systemImage: "person.3") }
                 ForEach(o.team.agents) { agent in
-                    Section(isExpanded: Binding(get: { !collapsed.contains(agent.id) },
-                                                set: { if $0 { collapsed.remove(agent.id) } else { collapsed.insert(agent.id) } })) {
-                        ForEach(o.chats(of: agent.id)) { c in
+                    // Plain Section: the whole name block toggles it, instead of the small disclosure arrow next to +.
+                    Section {
+                        if !collapsed.contains(agent.id) { ForEach(o.chats(of: agent.id)) { c in
                             NavigationLink(value: Selection.chat(c.id)) {
                                 HStack(spacing: 6) {
                                     Circle().fill(c.status.color).frame(width: 8, height: 8)
@@ -65,9 +65,10 @@ struct MainView: View {
                                 }
                             }
                             .contextMenu { Button("Xoá chat", role: .destructive) { o.deleteChat(c.id) } }
-                        }
+                        } }
                     } header: {
                         HStack {
+                            HStack {
                             VStack(alignment: .leading, spacing: 1) {
                                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                                     Text(o.team.role(agent.roleId)?.name ?? agent.roleId).font(.title3.bold())
@@ -83,6 +84,12 @@ struct MainView: View {
                                 }
                             }
                             Spacer()
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                if collapsed.contains(agent.id) { collapsed.remove(agent.id) } else { collapsed.insert(agent.id) }
+                            }
+                            .help(collapsed.contains(agent.id) ? "Bấm để mở danh sách chat" : "Bấm để thu gọn")
                             Button {
                                 selection = .chat(o.newChat(agentId: agent.id, title: Chat.untitled))
                             } label: { Image(systemName: "plus") }

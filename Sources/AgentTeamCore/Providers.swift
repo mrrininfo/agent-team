@@ -80,7 +80,8 @@ public struct OutputParser {
     public init(_ provider: Provider) { self.provider = provider }
 
     public mutating func feed(_ line: String) -> [RunEvent] {
-        guard let data = line.data(using: .utf8),
+        // Every event is a JSON object; skipping other lines cheaply matters when a CLI floods plain text.
+        guard line.utf8.first(where: { $0 != 32 && $0 != 9 }) == UInt8(ascii: "{"), let data = line.data(using: .utf8),
               let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
         switch provider {
         case .claude: return claude(o)

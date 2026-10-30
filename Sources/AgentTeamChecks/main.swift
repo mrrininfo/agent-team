@@ -417,6 +417,19 @@ do {
     check(kids.count == 1 && kids.allSatisfy { kill($0, 0) != 0 } && !p.isRunning, "terminateTree stops the CLI and its child command")
 }
 
+// Output caps: an endless line or a flood of stderr stays bounded
+do {
+    var r = LineReader(maxLine: 8)
+    var got: [String] = []
+    for piece in ["o", "k\r\n01234", "56789abc\nnext\nta", "il"] { got += r.feed(Data(piece.utf8)) }
+    if let l = r.finish() { got.append(l) }
+    check(got == ["ok", "next", "tail"] && r.total == 27, "over-long stdout line is dropped, others kept")
+    var t = TailBuffer(limit: 10)
+    for _ in 0..<1000 { t.append(Data("0123456789".utf8)) }
+    t.append(Data("END".utf8))
+    check(t.text == "3456789END" && t.data.count <= 20, "stderr keeps only its tail")
+}
+
 // Orchestrator flow with a fake runner
 let ws = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-check-\(shortId())")
 try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: true)
@@ -869,7 +882,31 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// Real pipes: a normal turn still parses, a flooding CLI is stopped instead of filling RAM
+@MainActor func outputCapScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-out-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    func script(_ name: String, _ body: String) throws -> String {
+        let f = dir.appendingPathComponent(name)
+        try ("#!/bin/sh\n" + body + "\n").write(to: f, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
+        return f.path
+    }
+    let ok = try script("ok", #"cat >/dev/null; echo '{"type":"result","subtype":"success","result":"xong","session_id":"s1"}'; yes err | head -c 3000000 >&2"#)
+    let flood = try script("flood", "cat >/dev/null; yes 'loop line'")
+    let runner = ProcessRunner(helperDir: nil)
+    let req = TurnRequest(prompt: "hi", profile: Profile(.claude, "sonnet"), sessionId: nil, access: .readOnly)
+    var final: String?
+    let e1 = await runner.run(chatId: "a", request: req, cwd: dir, binaryPath: ok) { if case .final(let t) = $0 { final = t } }
+    check(e1 == nil && final == "xong", "real CLI output still parses with capped readers")
+    let started = Date()
+    let e2 = await runner.run(chatId: "b", request: req, cwd: dir, binaryPath: flood) { _ in }
+    check(e2?.contains("MB") == true && Date().timeIntervalSince(started) < 60, "flooding CLI is stopped at the output cap")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await outputCapScenario()
 try await badModelScenario()
 try await limitUntilScenario()
 try await relayScenario()

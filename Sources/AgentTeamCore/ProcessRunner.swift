@@ -312,19 +312,97 @@ public final class ProcessRunner {
             Task.detached { h.write(data); try? h.close() }
         }
         let errHandle = err.fileHandleForReading
-        let stderrTask = Task.detached { String(decoding: errHandle.readDataToEndOfFile(), as: UTF8.self) }
+        // Only the tail of stderr is ever shown, so only the tail is kept: a looping CLI once filled 42 GB here.
+        let stderrTask = Task.detached {
+            var t = TailBuffer(limit: OutputLimits.stderrTail)
+            while case let d = errHandle.availableData, !d.isEmpty { t.append(d) }
+            return t.text
+        }
 
-        var parser = OutputParser(provider)
-        do {
-            for try await line in out.fileHandleForReading.bytes.lines {
-                for e in parser.feed(line) { onEvent(e) }
+        // Read and parse off the main actor; awaiting each batch's delivery keeps backpressure on the pipe.
+        let outHandle = out.fileHandleForReading
+        let overflow = await Task.detached { () -> Bool in
+            var parser = OutputParser(provider)
+            var lines = LineReader(maxLine: OutputLimits.maxLine)
+            while case let d = outHandle.availableData, !d.isEmpty {
+                let events = lines.feed(d).flatMap { parser.feed($0) }
+                if !events.isEmpty { await MainActor.run { events.forEach(onEvent) } }
+                if lines.total > OutputLimits.maxTotal { ProcessRunner.terminateTree(pid); return true }
             }
-        } catch {}
+            let events = lines.finish().map { parser.feed($0) } ?? []
+            if !events.isEmpty { await MainActor.run { events.forEach(onEvent) } }
+            return false
+        }.value
         var status: Int32 = 0
         for await s in exited { status = s }
         let stderr = await stderrTask.value
+        if overflow {
+            return "\(provider.title) in ra hơn \(OutputLimits.maxTotal >> 20) MB trong một lượt (có thể đang lặp). Đã dừng tiến trình để bảo vệ RAM."
+        }
         return status == 0 ? nil : "exit \(status): " + tail(stderr.trimmingCharacters(in: .whitespacesAndNewlines), 1500)
     }
+}
+
+// MARK: - Output limits
+
+/// Caps on what one turn's CLI output may hold in memory.
+public enum OutputLimits {
+    public static let stderrTail = 64 << 10
+    /// Longer stdout lines are dropped whole (a cut JSON event would not parse anyway).
+    public static let maxLine = 8 << 20
+    /// A turn printing more than this is treated as looping and stopped.
+    public static let maxTotal = 200 << 20
+}
+
+/// Splits a byte stream into lines without letting one endless line grow without bound.
+public struct LineReader {
+    let maxLine: Int
+    var buffer = Data()
+    var dropping = false
+    public private(set) var total = 0
+
+    public init(maxLine: Int) { self.maxLine = maxLine }
+
+    public mutating func feed(_ chunk: Data) -> [String] {
+        total += chunk.count
+        var out: [String] = []
+        var rest = chunk[...]
+        while let nl = rest.firstIndex(of: 10) {
+            if !dropping && buffer.count + rest.distance(from: rest.startIndex, to: nl) <= maxLine {
+                buffer.append(contentsOf: rest[..<nl])
+                if buffer.last == 13 { buffer.removeLast() }
+                out.append(String(decoding: buffer, as: UTF8.self))
+            }
+            buffer.removeAll(keepingCapacity: true)
+            dropping = false
+            rest = rest[rest.index(after: nl)...]
+        }
+        if !dropping {
+            buffer.append(contentsOf: rest)
+            if buffer.count > maxLine { dropping = true; buffer = Data() }
+        }
+        return out
+    }
+
+    public mutating func finish() -> String? {
+        defer { buffer = Data() }
+        return dropping || buffer.isEmpty ? nil : String(decoding: buffer, as: UTF8.self)
+    }
+}
+
+/// Keeps only the last `limit` bytes appended.
+public struct TailBuffer {
+    let limit: Int
+    public private(set) var data = Data()
+
+    public init(limit: Int) { self.limit = limit }
+
+    public mutating func append(_ d: Data) {
+        data.append(d)
+        if data.count > limit * 2 { data = Data(data.suffix(limit)) }
+    }
+
+    public var text: String { String(decoding: data.suffix(limit), as: UTF8.self) }
 }
 
 // MARK: - Account
