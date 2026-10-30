@@ -344,7 +344,7 @@ public final class ProcessRunner {
 
         if provider.promptViaStdin {
             let data = Data(request.prompt.utf8), h = inp.fileHandleForWriting
-            Task.detached { h.write(data); try? h.close() }
+            Task.detached { try? h.write(contentsOf: data); try? h.close() }  // throwing write: EPIPE must not raise
         }
         let errHandle = err.fileHandleForReading
         // Only the tail of stderr is ever shown, so only the tail is kept: a looping CLI once filled 42 GB here.

@@ -1049,7 +1049,22 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     }
 }
 
+// A CLI that exits without reading a large stdin prompt must not take the app down with SIGPIPE
+@MainActor func sigpipeScenario() async throws {
+    signal(SIGPIPE, SIG_IGN)
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-pipe-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let f = dir.appendingPathComponent("quit")
+    try "#!/bin/sh\nexit 3\n".write(to: f, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
+    let req = TurnRequest(prompt: String(repeating: "x", count: 1 << 20), profile: Profile(.claude, "sonnet"), sessionId: nil, access: .readOnly)
+    let e = await ProcessRunner(helperDir: nil).run(chatId: "p", request: req, cwd: dir, binaryPath: f.path) { _ in }
+    check(e?.hasPrefix("exit 3") == true, "CLI exiting before reading its prompt is an error, not a crash")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await sigpipeScenario()
 try await authTimeoutScenario()
 try await glossaryScenario()
 try await graphScenario()
