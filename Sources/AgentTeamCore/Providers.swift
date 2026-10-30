@@ -223,7 +223,9 @@ public func isLimitError(_ text: String) -> Bool {
         "limit reached", "hit your limit", "too many requests", "credit balance",
         "out of credits", "quota exceeded", "exceeded your quota",
         "exceeded your current quota", "over quota", "quota limit", "insufficient_quota",
-        "rate_limit_error"
+        "rate_limit_error",
+        // agy: "Individual quota reached. Please upgrade your subscription… Resets in 2h6m16s."
+        "quota reached"
     ]
     if phrases.contains(where: { t.contains($0) }) { return true }
     // Claude: "You've hit your 5-hour limit · resets 12:50am", "hit your weekly limit".
@@ -258,6 +260,16 @@ public func isAuthTimeout(_ text: String) -> Bool { text.lowercased().contains("
 /// When a limit message says the limit resets, e.g. Claude's "resets 12:50am (Asia/Saigon)" or "resets Nov 2, 9am".
 /// nil when the text names no time.
 public func limitResetDate(_ text: String, now: Date = Date()) -> Date? {
+    // agy gives a duration: "Resets in 2h6m16s".
+    if let r = text.range(of: #"resets in\s*((\d+)\s*h)?\s*((\d+)\s*m)?\s*((\d+)\s*s)?"#, options: [.regularExpression, .caseInsensitive]) {
+        let part = text[r].lowercased()
+        func n(_ unit: String) -> Double {
+            guard let u = part.range(of: #"\d+\s*"# + unit, options: .regularExpression) else { return 0 }
+            return Double(part[u].filter(\.isNumber)) ?? 0
+        }
+        let secs = n("h") * 3600 + n("m") * 60 + n("s")
+        if secs > 0 { return now.addingTimeInterval(secs) }
+    }
     let pattern = #"resets\s+(?:([A-Za-z]{3})[a-z]*\.? (\d{1,2}),?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)(?:\s*\(([^)]+)\))?"#
     guard let re = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
           let m = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }

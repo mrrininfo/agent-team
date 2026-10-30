@@ -297,6 +297,9 @@ public struct Team: Codable, Sendable {
     public var limitedUntil: [String: Date]?
     /// `Profile.modelKey`s the CLI rejected as missing/unavailable; skipped like a limited provider until cleared.
     public var badModels: Set<String>?
+    /// `Profile.modelKey` → when its quota resets. Antigravity's quota is per model (Gemini Flash can be used up while
+    /// gemini-argon still runs), so only that model is skipped and the role's other Antigravity fallbacks keep working.
+    public var limitedModels: [String: Date]?
     public var limitCooldownMinutes = 30
     /// Provider rawValue → absolute binary path; empty means auto-detect from the login shell PATH.
     public var binaryPaths: [String: String] = [:]
@@ -327,6 +330,7 @@ public struct Team: Codable, Sendable {
 
     public func usable(_ p: Profile) -> Bool {
         !disabledProviders.contains(p.provider) && !limitedProviders.contains(p.provider) && !(badModels ?? []).contains(p.modelKey)
+            && limitedModels?[p.modelKey] == nil
     }
 
     public func effectiveProfile(for agent: Agent) -> Profile? {

@@ -344,30 +344,34 @@ public final class ProcessRunner {
 
         if provider.promptViaStdin {
             let data = Data(request.prompt.utf8), h = inp.fileHandleForWriting
-            Task.detached { try? h.write(contentsOf: data); try? h.close() }  // throwing write: EPIPE must not raise
+            DispatchQueue.global().async { try? h.write(contentsOf: data); try? h.close() }  // throwing write: EPIPE must not raise
         }
         let errHandle = err.fileHandleForReading
         // Only the tail of stderr is ever shown, so only the tail is kept: a looping CLI once filled 42 GB here.
-        let stderrTask = Task.detached {
-            var t = TailBuffer(limit: OutputLimits.stderrTail)
-            while case let d = errHandle.availableData, !d.isEmpty { t.append(d) }
-            return t.text
+        let stderrTask = Task {
+            await Self.offPool {
+                var t = TailBuffer(limit: OutputLimits.stderrTail)
+                while case let d = errHandle.availableData, !d.isEmpty { t.append(d) }
+                return t.text
+            }
         }
 
-        // Read and parse off the main actor; awaiting each batch's delivery keeps backpressure on the pipe.
+        // Parse off the main actor; delivering each batch synchronously keeps backpressure on the pipe.
         let outHandle = out.fileHandleForReading
-        let overflow = await Task.detached { () -> Bool in
+        let overflow = await Self.offPool { () -> Bool in
             var parser = OutputParser(provider)
             var lines = LineReader(maxLine: OutputLimits.maxLine)
+            func deliver(_ events: [RunEvent]) {
+                guard !events.isEmpty else { return }
+                DispatchQueue.main.sync { MainActor.assumeIsolated { events.forEach(onEvent) } }
+            }
             while case let d = outHandle.availableData, !d.isEmpty {
-                let events = lines.feed(d).flatMap { parser.feed($0) }
-                if !events.isEmpty { await MainActor.run { events.forEach(onEvent) } }
+                deliver(lines.feed(d).flatMap { parser.feed($0) })
                 if lines.total > OutputLimits.maxTotal { ProcessRunner.terminateTree(pid); return true }
             }
-            let events = lines.finish().map { parser.feed($0) } ?? []
-            if !events.isEmpty { await MainActor.run { events.forEach(onEvent) } }
+            deliver(lines.finish().map { parser.feed($0) } ?? [])
             return false
-        }.value
+        }
         var status: Int32 = 0
         for await s in exited { status = s }
         let stderr = await stderrTask.value
@@ -375,6 +379,14 @@ public final class ProcessRunner {
             return "\(provider.title) in ra hơn \(OutputLimits.maxTotal >> 20) MB trong một lượt (có thể đang lặp). Đã dừng tiến trình để bảo vệ RAM."
         }
         return status == 0 ? nil : "exit \(status): " + tail(stderr.trimmingCharacters(in: .whitespacesAndNewlines), 1500)
+    }
+}
+
+/// Runs blocking pipe I/O on a GCD thread. Blocking inside Swift's small cooperative pool starved it when several
+/// turns ran at once: a CLI then waited over 3 s for its prompt ("no stdin data received in 3s").
+extension ProcessRunner {
+    nonisolated static func offPool<T: Sendable>(_ body: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { c in DispatchQueue.global(qos: .userInitiated).async { c.resume(returning: body()) } }
     }
 }
 

@@ -66,6 +66,17 @@ struct TeamView: View {
                     Button("Bỏ đánh dấu model lỗi") { o.team.badModels = nil; o.retryLimited() }
                 }
             }
+            if let lm = o.team.limitedModels, !lm.isEmpty {
+                HStack {
+                    Image(systemName: "hourglass").foregroundStyle(.orange)
+                    Text("Model hết quota, đang dùng fallback: " + lm.sorted { $0.key < $1.key }.map {
+                        "\($0.key.replacingOccurrences(of: "|", with: " · ")) (tới \($0.value.formatted(date: .omitted, time: .shortened)))"
+                    }.joined(separator: ", "))
+                        .font(.caption)
+                    Spacer()
+                    Button("Thử lại ngay") { o.team.limitedModels = nil; o.retryLimited() }
+                }
+            }
             ForEach(Provider.allCases) { p in
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {

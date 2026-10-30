@@ -191,6 +191,16 @@ public final class Orchestrator {
                     }
                 }
             }
+            // Chats an older version failed on a quota message it did not recognise: park them like any limit,
+            // with their last request, so they continue on a fallback or at reset instead of waiting for a manual "Tiếp tục".
+            for c in chats where c.status == .failed && c.pending.isEmpty {
+                guard let last = c.messages.last, last.kind == .system, isLimitError(last.text),
+                      let ask = c.messages.last(where: { [.user, .task, .handoff].contains($0.kind) }) else { continue }
+                update(c.id) {
+                    $0.pending = [Input(text: ask.text, fromUser: ask.kind == .user)]
+                    $0.status = .queued  // the next run meets the quota again, now recognised, and moves to a fallback
+                }
+            }
         }
 
         let envSHA = ProcessInfo.processInfo.environment["AGENTTEAM_GIT_SHA"]
@@ -296,6 +306,10 @@ public final class Orchestrator {
         for p in team.limitedProviders {
             let until = team.limitedUntil?[p.rawValue] ?? (team.limitedSince[p.rawValue] ?? .distantPast).addingTimeInterval(cooldown)
             if until <= now { clearLimit(p) }
+        }
+        if let models = team.limitedModels, models.values.contains(where: { $0 <= now }) {
+            team.limitedModels = models.filter { $0.value > now }
+            retryLimited()
         }
     }
 
@@ -413,6 +427,8 @@ public final class Orchestrator {
             - Không tự chạy `claude`, `codex`, `agy` hay tự làm thay phần việc của vai trò khác (kể cả khi họ lỗi/limit):
               app tự chuyển provider dự phòng theo đúng thứ tự cài đặt và tự thử lại khi lỗi mạng, việc hiện trong tab của vai trò đó.
               Vai trò báo lỗi thì giao lại bằng `--tab <chatId>` của họ.
+            - Hết quota/limit (kể cả mọi fallback) KHÔNG phải lỗi: app giữ việc, tự chờ tới giờ reset rồi tự chạy tiếp và gửi kết quả về.
+              Không bảo người dùng gõ "Tiếp tục" hay đổi model; cứ kết thúc lượt, kết quả sẽ tự tới.
             - Chỉ viết "sẽ giao" KHÔNG tạo nhiệm vụ; phải chạy lệnh. Mỗi lượt tối đa \(team.maxDispatchPerTurn) lần giao.
             - Nội dung giao phải tự đủ: phạm vi, đầu ra, bằng chứng cần báo cáo (agent nhận không thấy cuộc trò chuyện này).
             - ACK `queued/started` chỉ là đã xếp hàng. Giao xong thì kết thúc lượt; kết quả tự gửi về chat này.
@@ -629,12 +645,21 @@ public final class Orchestrator {
             scheduleCompact(chatId, profile: profile)
             if team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.access == .write { refreshGraph() }
         } else if let error, isLimitError(error) {
-            team.limitedProviders.insert(profile.provider)
-            team.limitedSince[profile.provider.rawValue] = Date()
             let until = limitReset(profile.provider, error: error)
-            team.limitedUntil = (team.limitedUntil ?? [:]).merging([profile.provider.rawValue: until].compactMapValues { $0 }) { $1 }
-            let wait = until.map { "Thử lại \(profile.provider.title) lúc \($0.formatted(date: .abbreviated, time: .shortened)) (giờ reset)." }
-                ?? "Thử lại \(profile.provider.title) sau \(team.limitCooldownMinutes) phút."
+            let who: String
+            if profile.provider == .antigravity {
+                // Per-model quota: park only this model; the role's other Antigravity models stay usable.
+                let cooldown = Date().addingTimeInterval(TimeInterval(team.limitCooldownMinutes * 60))
+                team.limitedModels = (team.limitedModels ?? [:]).merging([profile.modelKey: until ?? cooldown]) { $1 }
+                who = profile.label
+            } else {
+                team.limitedProviders.insert(profile.provider)
+                team.limitedSince[profile.provider.rawValue] = Date()
+                team.limitedUntil = (team.limitedUntil ?? [:]).merging([profile.provider.rawValue: until].compactMapValues { $0 }) { $1 }
+                who = profile.provider.title
+            }
+            let wait = until.map { "Thử lại \(who) lúc \($0.formatted(date: .abbreviated, time: .shortened)) (giờ reset)." }
+                ?? "Thử lại \(who) sau \(team.limitCooldownMinutes) phút."
             let canContinue = team.autoFailover && team.agent(c.agentId).flatMap(team.effectiveProfile) != nil
             update(chatId) {
                 $0.pending = $0.inFlight + $0.pending
@@ -642,7 +667,7 @@ public final class Orchestrator {
                 $0.status = canContinue ? .queued : .limited
                 $0.reportedModel = nil
                 $0.reportedModelProvider = nil
-                $0.messages.append(Message(.system, "\(profile.provider.title) bị limit: \(clip(error, 300))\n"
+                $0.messages.append(Message(.system, "\(who) bị limit: \(clip(error, 300))\n"
                     + (canContinue ? "Tự động chuyển sang provider dự phòng kèm gói bàn giao. " : "Hết fallback; việc được giữ và tự chạy lại. ") + wait))
             }
         } else if let error, isModelError(error) {

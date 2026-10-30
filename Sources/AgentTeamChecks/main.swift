@@ -1063,7 +1063,74 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// Many turns at once: blocked pipe readers must not starve the prompt writes (CLIs give up after a few seconds)
+@MainActor func concurrentPipesScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-conc-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let f = dir.appendingPathComponent("slow")
+    try """
+        #!/bin/bash
+        if IFS= read -r -t 2 line; then sleep 2; echo '{"type":"result","subtype":"success","result":"ok","session_id":"s"}'; else echo 'no stdin data received' >&2; exit 4; fi
+        """.write(to: f, atomically: true, encoding: .utf8)
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
+    let runner = ProcessRunner(helperDir: nil)
+    let req = TurnRequest(prompt: "hi\n", profile: Profile(.claude, "sonnet"), sessionId: nil, access: .readOnly)
+    var errors: [String?] = []
+    await withTaskGroup(of: String?.self) { g in
+        for i in 0..<16 { g.addTask { @MainActor in await runner.run(chatId: "c\(i)", request: req, cwd: dir, binaryPath: f.path) { _ in } } }
+        for await e in g { errors.append(e) }
+    }
+    check(errors.count == 16 && errors.allSatisfy { $0 == nil }, "16 concurrent turns all receive their prompt (\(errors.compactMap { $0 }.first ?? ""))")
+    try? FileManager.default.removeItem(at: dir)
+}
+
+// agy per-model quota: recognised, only that model parked, the role's next Antigravity model takes over; resumes at reset
+@MainActor func agyQuotaScenario() async throws {
+    let now = Date()
+    let err = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 2h6m16s."
+    check(isLimitError(err), "agy 'quota reached' is a limit")
+    check(limitResetDate(err, now: now).map { Int($0.timeIntervalSince(now)) } == 7576, "agy 'Resets in 2h6m16s' parses")
+    check(limitResetDate("Resets in 45m", now: now).map { Int($0.timeIntervalSince(now)) } == 2700, "agy minutes-only reset parses")
+
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-agyq-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var used: [String] = []
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        used.append(req.profile.model)
+        if req.profile.model == "gemini-3.8-flash-high" { return "exit 1: " + err }
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    let worker = o.team.agents.first { $0.roleId == "worker" }!
+    let c = o.newChat(agentId: worker.id, title: "w")
+    o.send("làm", to: c)
+    for _ in 0..<300 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(o.chat(c)?.status == .done && used == ["gemini-3.8-flash-high", "claude-sonnet-5-5-high"]
+          && !o.team.limitedProviders.contains(.antigravity) && o.team.limitedModels?.count == 1,
+          "agy quota parks only that model; the next Antigravity fallback continues (\(used))")
+    o.releaseExpiredLimits(now: now.addingTimeInterval(3 * 3600))
+    check(o.team.limitedModels?.isEmpty == true, "parked model is released after its reset")
+
+    // A chat an older build failed on this message is queued again on reopen
+    var old = Chat(agentId: worker.id, title: "old")
+    old.messages = [Message(.task, "việc cũ"), Message(.system, "Lỗi: " + err)]
+    old.status = .failed
+    let f = old.id
+    let enc = JSONEncoder()
+    enc.dateEncodingStrategy = .iso8601
+    try enc.encode(old).write(to: TeamPaths(workspace: dir).chatFile(f))
+    o.releaseLock()
+    let o2 = try Orchestrator(workspace: dir) { _, _, _, emit in emit(.final("ok")); return nil }
+    check(o2.chat(f)?.pending.first?.text == "việc cũ" && [.queued, .running, .done].contains(o2.chat(f)?.status),
+          "chat failed on an unrecognised quota error is requeued on reopen")
+    o2.releaseLock()
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await agyQuotaScenario()
+try await concurrentPipesScenario()
 try await sigpipeScenario()
 try await authTimeoutScenario()
 try await glossaryScenario()
