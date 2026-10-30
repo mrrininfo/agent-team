@@ -12,6 +12,8 @@ struct ChatView: View {
     @State private var attachments: [Attachment] = []
     @State private var attachError = ""
     @State private var dropTargeted = false
+    @State private var shown = ChatView.page
+    static let page = 30
     @State private var pasteMonitor: Any?
 
     var body: some View {
@@ -23,7 +25,15 @@ struct ChatView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
-                            ForEach(c.messages) { MessageRow(m: $0, root: o.paths.workspace) }
+                            // Only the tail is laid out: a long chat (Lead reaches 150+ replies) made each update re-measure
+                            // every row, freezing the UI for over a minute and growing RAM by ~0.6 GB.
+                            if c.messages.count > shown {
+                                Button("Hiện \(min(Self.page, c.messages.count - shown)) tin cũ hơn (còn \(c.messages.count - shown))") {
+                                    shown += Self.page
+                                }
+                                .buttonStyle(.link).font(.caption)
+                            }
+                            ForEach(c.messages.suffix(shown)) { MessageRow(m: $0, root: o.paths.workspace) }
                             if !c.activity.isEmpty {
                                 HStack(spacing: 8) {
                                     ProgressView().controlSize(.small)
