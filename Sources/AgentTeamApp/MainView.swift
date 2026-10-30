@@ -20,12 +20,11 @@ struct MainView: View {
 
     var displayName: String { o.team.name ?? o.paths.workspace.lastPathComponent }
 
-    /// Running, then waiting, then limited; otherwise the state of the chat with the latest message
-    /// (an old failed chat does not keep the group red).
+    /// Running, then waiting, then limited; otherwise the state of the bottom chat, the one seen last when expanded.
     func groupStatus(_ agentId: String) -> ChatStatus? {
         let cs = o.chats(of: agentId)
         for st in [ChatStatus.running, .queued, .limited] where cs.contains(where: { $0.status == st }) { return st }
-        return cs.max { ($0.messages.last?.date ?? .distantPast) < ($1.messages.last?.date ?? .distantPast) }?.status
+        return cs.last?.status
     }
 
     func saveName() {

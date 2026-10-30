@@ -198,6 +198,7 @@ final class AppModel {
             box.o = o
             o.cancelTurn = { r.cancel($0) }
             o.antigravityBinary = { r.binary(for: .antigravity, override: box.o?.team.binaryPaths[Provider.antigravity.rawValue]) }
+            o.accountCheck = { p in await r.accountStatus(p, override: box.o?.team.binaryPaths[p.rawValue]).ok }
             if let g = r.graphifyBinary() {
                 let path = r.searchPath
                 o.graphUpdater = { await ProcessRunner.updateGraph(binary: g, workspace: $0, path: path) }

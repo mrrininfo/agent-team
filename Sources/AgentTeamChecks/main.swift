@@ -1013,7 +1013,44 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// agy "authentication failed or timed out": still signed in → network retry; signed out → fail now, work kept
+@MainActor func authTimeoutScenario() async throws {
+    for signedIn in [true, false] {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-auth-\(shortId())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var runs = 0
+        let o = try Orchestrator(workspace: dir) { _, _, _, emit in
+            runs += 1
+            if runs == 1 { return "exit 1: authentication failed or timed out" }
+            emit(.final("ok"))
+            return nil
+        }
+        o.gitStatus = { _ in nil }
+        var checked: [Provider] = []
+        o.accountCheck = { p in checked.append(p); return signedIn }
+        let worker = o.team.agents.first { $0.roleId == "worker" }!
+        let c = o.newChat(agentId: worker.id, title: "w")
+        o.send("việc", to: c)
+        for _ in 0..<200 where checked.isEmpty || (o.retryAt[c] == nil && o.chat(c)?.status != .failed) {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        if signedIn {
+            check(checked == [.antigravity] && o.retryAt[c] != nil && o.chat(c)?.status == .queued && o.chat(c)?.pending.count == 1,
+                  "auth timeout while signed in waits and retries like a network drop")
+            o.retryNow(c)
+            for _ in 0..<200 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+            check(o.chat(c)?.status == .done && runs == 2, "auth-timeout retry finishes the work")
+        } else {
+            check(o.chat(c)?.status == .failed && o.chat(c)?.pending.count == 1 && runs == 1
+                  && o.chat(c)?.messages.last?.text.contains("chưa đăng nhập") == true,
+                  "auth timeout while signed out fails at once and keeps the work")
+        }
+        try? FileManager.default.removeItem(at: dir)
+    }
+}
+
 try await scenario()
+try await authTimeoutScenario()
 try await glossaryScenario()
 try await graphScenario()
 try await compactScenario()

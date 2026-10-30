@@ -252,6 +252,9 @@ public func isNetworkError(_ text: String) -> Bool {
             "overloaded", "service unavailable", "bad gateway", "gateway timeout"].contains { t.contains($0) }
 }
 
+/// agy's wording when it cannot refresh its sign-in, usually because the network dropped; retried after a login check.
+public func isAuthTimeout(_ text: String) -> Bool { text.lowercased().contains("authentication failed or timed out") }
+
 /// When a limit message says the limit resets, e.g. Claude's "resets 12:50am (Asia/Saigon)" or "resets Nov 2, 9am".
 /// nil when the text names no time.
 public func limitResetDate(_ text: String, now: Date = Date()) -> Date? {

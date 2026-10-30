@@ -58,6 +58,8 @@ public final class Orchestrator {
     @ObservationIgnored var ticks = 0
     /// Path of the `agy` binary, if installed (set by the app); used only to read Antigravity's quota panel.
     @ObservationIgnored public var antigravityBinary: () -> String? = { nil }
+    /// Whether a provider CLI is signed in (nil = unknown); nil closure means never checked.
+    @ObservationIgnored public var accountCheck: (@MainActor (Provider) async -> Bool?)?
     /// Rebuilds the code graph (graphify); nil when graphify is not installed.
     @ObservationIgnored public var graphUpdater: ((URL) async -> Bool)?
     @ObservationIgnored public private(set) var graphBusy = false
@@ -655,6 +657,24 @@ public final class Orchestrator {
                     + "Đổi tên model trong Team & Provider rồi bấm \"Bỏ đánh dấu model lỗi\"."))
             }
             if next == nil, delegated { callback(from: c, status: "lỗi", text: "Model \(profile.label) không còn dùng được và không còn fallback.", turnProfile: profile) }
+        } else if let error, isAuthTimeout(error), (netRetries[chatId] ?? 0) < Self.netBackoff.count {
+            // Signed out for real: say so now. Otherwise it was the network: retry with the usual back-off.
+            update(chatId) { $0.pending = $0.inFlight + $0.pending; $0.inFlight = []; $0.status = .queued }
+            retryAt[chatId] = .distantFuture
+            let check = accountCheck
+            Task {
+                let signedIn = await check?(profile.provider)
+                // Network came back meanwhile and the chat already restarted: nothing left to decide.
+                guard retryAt[chatId] == .distantFuture else { return }
+                retryAt[chatId] = nil
+                guard signedIn == false else { return waitForNetwork(chatId, reason: clip(error, 200)) }
+                let msg = "\(profile.provider.title) chưa đăng nhập (\(clip(error, 120))). Việc được giữ; bấm Login trong Team & Provider rồi gửi tin nhắn để chạy lại."
+                update(chatId) { $0.status = .failed; $0.messages.append(Message(.system, msg)) }
+                if delegated { callback(from: c, status: "lỗi", text: msg, turnProfile: profile) }
+                recordHealth()
+                pump()
+            }
+            return
         } else if let error, isNetworkError(error) || !online, (netRetries[chatId] ?? 0) < Self.netBackoff.count {
             update(chatId) { $0.pending = $0.inFlight + $0.pending; $0.inFlight = [] }
             return waitForNetwork(chatId, reason: clip(error, 200))
