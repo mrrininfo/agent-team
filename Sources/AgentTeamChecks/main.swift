@@ -1128,7 +1128,37 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// A stuck agy conversation (same stream error every resume) is dropped for a fresh one with the handoff package
+@MainActor func stuckAgySessionScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-stuck-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var sessions: [String?] = []
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        sessions.append(req.sessionId)
+        emit(.session("conv1"))
+        if sessions.count == 1 { emit(.final("bắt đầu")); return nil }
+        if req.sessionId == "conv1" { return "exit 1: API error (attempt 1): request failed: stream idle timeout (5m0s): context deadline exceeded" }
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    let worker = o.team.agents.first { $0.roleId == "worker" }!
+    let c = o.newChat(agentId: worker.id, title: "w")
+    o.send("một", to: c)
+    for _ in 0..<300 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    o.send("hai", to: c)
+    for _ in 0..<10 {
+        for _ in 0..<300 where o.retryAt[c] == nil && o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+        if o.chat(c)?.status == .done { break }
+        o.retryNow(c)
+        for _ in 0..<300 where o.chat(c)?.status == .running || (o.chat(c)?.status == .queued && o.retryAt[c] == nil) { try? await Task.sleep(nanoseconds: 5_000_000) }
+    }
+    check(o.chat(c)?.status == .done && sessions == [nil, "conv1", "conv1", nil], "stuck agy conversation is replaced after two failures (\(sessions))")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await stuckAgySessionScenario()
 try await agyQuotaScenario()
 try await concurrentPipesScenario()
 try await sigpipeScenario()

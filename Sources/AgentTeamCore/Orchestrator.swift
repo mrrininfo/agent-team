@@ -702,6 +702,14 @@ public final class Orchestrator {
             return
         } else if let error, isNetworkError(error) || !online, (netRetries[chatId] ?? 0) < Self.netBackoff.count {
             update(chatId) { $0.pending = $0.inFlight + $0.pending; $0.inFlight = [] }
+            // An agy conversation can get stuck replaying one stored stream error in seconds while a fresh
+            // conversation works; from the second failure in a row (network up) start fresh with the handoff package.
+            if online, profile.provider == .antigravity, (netRetries[chatId] ?? 0) >= 1, c.sessionId != nil {
+                update(chatId) {
+                    $0.sessionId = nil
+                    $0.messages.append(Message(.system, "Phiên Antigravity cũ lặp lại cùng một lỗi; lần thử tới mở phiên mới kèm gói bàn giao."))
+                }
+            }
             return waitForNetwork(chatId, reason: clip(error, 200))
         } else {
             let msg = error ?? "Không nhận được kết quả từ \(profile.provider.binaryName)."
