@@ -278,6 +278,9 @@ struct TeamView: View {
             Stepper("Coi là treo khi không có tín hiệu: \(o.team.stallMinutes ?? 20) phút",
                     value: Binding(get: { o.team.stallMinutes ?? 20 }, set: { o.team.stallMinutes = $0 }), in: 5...120, step: 5)
                 .help("Agent không in ra gì trong thời gian này (thường do một lệnh/test chạy mãi) thì app dừng nó cùng các lệnh con, chạy lại một lần kèm cảnh báo; treo lần nữa thì báo lỗi. Rớt mạng thì tự thử lại khi có mạng.")
+            Stepper(o.team.compactAt == 0 ? "Tự nén context: tắt" : "Tự nén context khi vượt: \(o.team.compactAt)% cửa sổ model",
+                    value: Binding(get: { o.team.compactAt }, set: { o.team.compactPercent = $0 }), in: 0...90, step: 10)
+                .help("Chỉ chạy giữa các lượt, không ngắt việc đang chạy. Claude: chạy /compact ngầm khi chat rảnh. Codex: tự nén khi chạm ngưỡng. Antigravity không có lệnh nén: lượt sau mở phiên mới kèm gói bàn giao. 0 = tắt.")
         }
     }
 }

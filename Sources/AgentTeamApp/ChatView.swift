@@ -96,7 +96,8 @@ struct ChatView: View {
             }
             ProfileEditor(profile: profile)
             if let t = c.lastTiming {
-                Text("Lượt cuối: tín hiệu đầu sau \(t.firstSignal.map(Self.seconds) ?? "—") · tổng \(Self.seconds(t.total)) · \(t.provider)")
+                Text("Lượt cuối: tín hiệu đầu sau \(t.firstSignal.map(Self.seconds) ?? "—") · tổng \(Self.seconds(t.total)) · \(t.provider)"
+                     + (c.context.map { " · context \($0 / 1000)k" + (c.contextWindow.map { "/\($0 / 1000)k" } ?? "") } ?? ""))
                     .font(.caption).foregroundStyle(.secondary)
                     .help("Tín hiệu đầu = thời gian CLI khởi động, nạp phiên/plugin/MCP tới lúc in ra dòng đầu tiên. Mọi lượt được ghi ở .agentteam/logs/turns.csv")
             }

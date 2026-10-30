@@ -217,6 +217,11 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
     public var reportedModelProvider: String?
     public var relay: Relay?
     public var lastTiming: TurnTiming?
+    /// Context size (tokens) after the last turn, and the model's window if the CLI reported it.
+    public var context: Int?
+    public var contextWindow: Int?
+    /// Set when the context passed the team's compact threshold; the next idle moment compacts the session.
+    public var compactDue: Bool?
 
     public init(id: String = shortId(), agentId: String, title: String, replyTo: String? = nil) {
         self.id = id
@@ -247,6 +252,7 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
         case sessionAccess, sessionCanDispatch
         case messages, pending, inFlight, trail, status, autoTurns, tokens, activity, runningProfile
         case receipts, reportedModel, reportedModelProvider, relay, lastTiming
+        case context, contextWindow, compactDue
     }
 
     public init(from decoder: Decoder) throws {
@@ -273,6 +279,9 @@ public struct Chat: Codable, Identifiable, Hashable, Sendable {
         reportedModelProvider = try container.decodeIfPresent(String.self, forKey: .reportedModelProvider)
         relay = try container.decodeIfPresent(Relay.self, forKey: .relay)
         lastTiming = try container.decodeIfPresent(TurnTiming.self, forKey: .lastTiming)
+        context = try container.decodeIfPresent(Int.self, forKey: .context)
+        contextWindow = try container.decodeIfPresent(Int.self, forKey: .contextWindow)
+        compactDue = try container.decodeIfPresent(Bool.self, forKey: .compactDue)
     }
 }
 
@@ -304,6 +313,9 @@ public struct Team: Codable, Sendable {
     public var customSetup: TeamSetup?
     /// A running turn with no output for this many minutes is treated as hung (nil = 20).
     public var stallMinutes: Int?
+    /// Compact a session once its context passes this % of the model's window (nil = 50, 0 = off).
+    public var compactPercent: Int?
+    public var compactAt: Int { compactPercent ?? 50 }
 
     public init(roles: [Role], agents: [Agent]) {
         self.roles = roles

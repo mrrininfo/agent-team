@@ -905,7 +905,58 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// Auto compact: Claude gets a hidden /compact turn between turns; Antigravity drops to a fresh session with handoff
+@MainActor func compactScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-compact-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var prompts: [String] = []
+    var codexLimit: Int?
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        prompts.append(req.prompt)
+        if req.profile.provider == .codex { codexLimit = req.compactTokens }
+        emit(.session("s1"))
+        if req.prompt == "/compact" { emit(.context(30_000, window: nil)); emit(.final("")); return nil }
+        emit(.context(req.prompt.contains("lớn") ? 600_000 : 10_000, window: 1_000_000))
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    let planner = o.team.agents.first { $0.roleId == "planner" }!
+    o.team.agents[o.team.agents.firstIndex { $0.id == planner.id }!].profile = Profile(.claude, "opus")
+    let c = o.newChat(agentId: planner.id, title: "p")
+    func settle() async { for _ in 0..<300 where o.chat(c)?.status != .done || o.chat(c)?.compactDue == true { try? await Task.sleep(nanoseconds: 5_000_000) } }
+    o.send("nhỏ", to: c); await settle()
+    check(prompts.count == 1 && o.chat(c)?.context == 10_000, "small context is left alone")
+    o.send("lớn", to: c); await settle()
+    check(prompts.last == "/compact" && o.chat(c)?.context == 30_000 && o.chat(c)?.messages.last?.text.contains("600k → 30k") == true,
+          "context over threshold gets a hidden /compact turn after the reply")
+    o.send("tiếp", to: c); await settle()
+    check(prompts.last?.hasSuffix("tiếp") == true && prompts.filter { $0 == "/compact" }.count == 1, "next turn resumes normally after compact")
+
+    let worker = o.team.agents.first { $0.roleId == "worker" }!
+    let w = o.newChat(agentId: worker.id, title: "w")
+    o.send("lớn", to: w)
+    for _ in 0..<300 where o.chat(w)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(o.chat(w)?.sessionId == nil && prompts.last != "/compact", "Antigravity over threshold drops its session instead of compacting")
+
+    let lead = o.team.agents.first { $0.roleId == "lead" }!
+    let l = o.newChat(agentId: lead.id, title: "l")
+    o.send("hi", to: l)
+    for _ in 0..<300 where o.chat(l)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(codexLimit == 258_400 / 2, "Codex gets its own compact limit at the team threshold")
+    var r = TurnRequest(prompt: "", profile: Profile(.codex, ""), sessionId: nil, access: .readOnly)
+    r.compactTokens = 1000
+    check(Provider.codex.arguments(r).contains("model_auto_compact_token_limit=1000"), "codex compact limit is passed as -c")
+
+    var p = OutputParser(.claude)
+    let ev = p.feed(#"{"type":"result","subtype":"success","result":"x","usage":{"input_tokens":2,"cache_creation_input_tokens":100,"cache_read_input_tokens":900,"output_tokens":5,"iterations":[{"input_tokens":1,"cache_creation_input_tokens":50,"cache_read_input_tokens":400}]},"modelUsage":{"m":{"contextWindow":1000000}}}"#)
+        + p.feed(#"{"type":"system","subtype":"compact_boundary","compact_metadata":{"pre_tokens":46829,"post_tokens":13910}}"#)
+    check(ev.contains(.context(451, window: 1_000_000)) && ev.contains(.context(13910, window: nil)), "claude context and compact result are parsed")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await compactScenario()
 try await outputCapScenario()
 try await badModelScenario()
 try await limitUntilScenario()

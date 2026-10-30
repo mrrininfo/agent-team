@@ -6,6 +6,8 @@ public struct TurnRequest: Sendable {
     public var sessionId: String?
     public var access: Access
     public var canDispatch: Bool
+    /// Codex compacts by itself once its context passes this many tokens (it ignores `/compact` in exec mode).
+    public var compactTokens: Int?
 
     public init(prompt: String, profile: Profile, sessionId: String?, access: Access, canDispatch: Bool = false) {
         self.prompt = prompt
@@ -27,6 +29,8 @@ public enum RunEvent: Equatable, Sendable {
     case quota([QuotaWindow])
     /// Exact model metadata reported by the CLI runtime.
     case modelMetadata(String)
+    /// Tokens the session's context holds now, and the model's window if known.
+    case context(Int, window: Int?)
 }
 
 private func int(_ d: [String: Any]?, _ k: String) -> Int { (d?[k] as? NSNumber)?.intValue ?? 0 }
@@ -60,6 +64,7 @@ extension Provider {
             var a = ["exec", "--json", "--skip-git-repo-check", "--sandbox", sandbox]
             if !p.model.isEmpty { a += ["-m", p.model] }
             if !p.effort.isEmpty { a += ["-c", "model_reasoning_effort=\(p.effort)"] }
+            if let n = r.compactTokens { a += ["-c", "model_auto_compact_token_limit=\(n)"] }
             if let s = r.sessionId { a += ["resume", s] }
             return a + ["-"]
         case .antigravity:
@@ -93,6 +98,10 @@ public struct OutputParser {
     mutating func claude(_ o: [String: Any]) -> [RunEvent] {
         switch o["type"] as? String {
         case "system":
+            if o["subtype"] as? String == "compact_boundary" {
+                let post = (o["compact_metadata"] as? [String: Any]).map { int($0, "post_tokens") } ?? 0
+                return post > 0 ? [.context(post, window: nil)] : []
+            }
             var ev: [RunEvent] = []
             if let s = o["session_id"] as? String { ev.append(.session(s)) }
             if let m = o["model"] as? String, !m.isEmpty { ev.append(.modelMetadata(m)) }
@@ -120,6 +129,11 @@ public struct OutputParser {
             if let s = o["session_id"] as? String { ev.append(.session(s)) }
             if let u = o["usage"] as? [String: Any] {
                 ev.append(.usage(int(u, "input_tokens") + int(u, "cache_creation_input_tokens") + int(u, "output_tokens")))
+                // The last model call's full input is the context the session now carries.
+                let last = (u["iterations"] as? [[String: Any]])?.last ?? u
+                let used = int(last, "input_tokens") + int(last, "cache_creation_input_tokens") + int(last, "cache_read_input_tokens")
+                let window = (o["modelUsage"] as? [String: Any])?.values.compactMap { ($0 as? [String: Any]).map { int($0, "contextWindow") } }.max()
+                if used > 0 { ev.append(.context(used, window: window.flatMap { $0 > 0 ? $0 : nil })) }
             }
             let text = (o["result"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? lastText
             let failed = (o["is_error"] as? Bool) == true || (o["subtype"] as? String).map { $0 != "success" } == true
@@ -183,6 +197,9 @@ public struct OutputParser {
             if let id = r["conversation_id"] as? String { ev.append(.session(id)) }
             if let u = r["usage"] as? [String: Any] {
                 ev.append(.usage(int(u, "input_tokens") - int(u, "cache_read_tokens") + int(u, "output_tokens") + int(u, "thinking_tokens")))
+                // shortcut: agy sums input over the run's model calls, so the average per call stands in for the context.
+                let calls = max(1, (r["num_turns"] as? Int) ?? 1)
+                if int(u, "input_tokens") > 0 { ev.append(.context(int(u, "input_tokens") / calls, window: nil)) }
             }
             if r["status"] as? String == "SUCCESS" {
                 ev.append(.final(r["response"] as? String ?? lastText))

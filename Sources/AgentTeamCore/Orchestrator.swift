@@ -447,6 +447,16 @@ public final class Orchestrator {
             update(chatId) { $0.status = .limited; $0.messages.append(Message(.system, "Không còn provider khả dụng cho agent này (đã tắt hoặc bị limit). Bật lại provider hoặc chuyển việc.")) }
             return pump()
         }
+        if c.compactDue == true {
+            update(chatId) { $0.compactDue = nil }
+            if c.sessionId != nil, c.sessionProfile == profile, profile.provider == .claude {
+                return await compactTurn(chatId, profile: profile, role: role)
+            }
+            if c.pending.isEmpty {
+                update(chatId) { $0.status = .done }
+                return pump()
+            }
+        }
         let inputs = c.pending
         if !inputs.contains(where: \.fromUser) {
             if c.autoTurns >= autoTurnCap {
@@ -495,8 +505,11 @@ public final class Orchestrator {
         var final: String?
         var failure: String?
         var turnReportedModel: String?
-        let req = TurnRequest(prompt: prompt, profile: profile, sessionId: resumable ? c.sessionId : nil,
+        var req = TurnRequest(prompt: prompt, profile: profile, sessionId: resumable ? c.sessionId : nil,
                               access: role.access, canDispatch: role.canDispatch)
+        if profile.provider == .codex, team.compactAt > 0 {
+            req.compactTokens = (Self.defaultWindow[.codex] ?? 0) * team.compactAt / 100
+        }
         lastSignal[chatId] = Date()
         let started = Date()
         var firstSignal: TimeInterval?
@@ -524,6 +537,7 @@ public final class Orchestrator {
                     $0.reportedModel = m
                     $0.reportedModelProvider = profile.provider.rawValue
                 }
+            case .context(let n, let w): self?.update(chatId) { $0.context = n; $0.contextWindow = w ?? $0.contextWindow }
             case .final(let t): final = t
             case .failure(let t): failure = t
             }
@@ -594,6 +608,7 @@ public final class Orchestrator {
             if delegated && !relayStep(c, final: final) {
                 callback(from: c, status: "xong", text: final, turnProfile: profile, turnModel: turnReportedModel)
             }
+            scheduleCompact(chatId, profile: profile)
         } else if let error, isLimitError(error) {
             team.limitedProviders.insert(profile.provider)
             team.limitedSince[profile.provider.rawValue] = Date()
@@ -636,6 +651,74 @@ public final class Orchestrator {
             if delegated { callback(from: c, status: "lỗi", text: msg, turnProfile: profile, turnModel: turnReportedModel) }
         }
         recordHealth()
+        pump()
+    }
+
+    // MARK: - Compact
+
+    /// shortcut: windows used when a CLI does not report one (Codex never does; 258 400 is what its rollout files show
+    /// for gpt-6-luna). Upgrade to reading `~/.codex/sessions` if a model's window differs a lot.
+    static let defaultWindow: [Provider: Int] = [.claude: 200_000, .codex: 258_400, .antigravity: 1_000_000]
+
+    /// After a successful turn, shrink a session whose context passed the team threshold, between turns only.
+    /// Claude gets a hidden `/compact` turn; Antigravity has no compact, so its next turn starts a fresh session
+    /// from the handoff package; Codex compacts by itself (see `TurnRequest.compactTokens`).
+    func scheduleCompact(_ chatId: String, profile: Profile) {
+        guard team.compactAt > 0, let c = chat(chatId), let used = c.context, c.sessionId != nil,
+              profile.provider != .codex else { return }
+        let window = c.contextWindow ?? Self.defaultWindow[profile.provider] ?? 0
+        guard window > 0, used * 100 >= window * team.compactAt else { return }
+        let pct = used * 100 / window
+        if profile.provider == .antigravity {
+            update(chatId) {
+                $0.sessionId = nil
+                $0.context = nil
+                $0.messages.append(Message(.system, "Context \(pct)% (\(used / 1000)k token). Antigravity không có lệnh nén, lượt sau mở phiên mới kèm gói bàn giao."))
+            }
+            return
+        }
+        update(chatId) {
+            $0.compactDue = true
+            if $0.status == .done { $0.status = .queued }
+        }
+        pump()
+    }
+
+    /// A hidden turn that runs `/compact` in the chat's own session; failure only leaves a note.
+    func compactTurn(_ chatId: String, profile: Profile, role: Role) async {
+        let before = chat(chatId)?.context ?? 0
+        update(chatId) { $0.activity = "Đang nén context…"; $0.runningProfile = profile }
+        lastSignal[chatId] = Date()
+        var after: Int?
+        var failure: String?
+        let req = TurnRequest(prompt: "/compact", profile: profile, sessionId: chat(chatId)?.sessionId,
+                              access: role.access, canDispatch: role.canDispatch)
+        let exitError = await runner(chatId, req, paths.workspace) { [weak self] e in
+            self?.lastSignal[chatId] = Date()
+            switch e {
+            case .context(let n, _): after = n
+            case .usage(let n): self?.update(chatId) { $0.tokens += max(0, n) }
+            case .failure(let t): failure = t
+            default: break
+            }
+        }
+        lastSignal[chatId] = nil
+        let stopped = stopping.remove(chatId) != nil
+        stalled.remove(chatId)
+        let note: String
+        if let after, failure == nil, exitError == nil {
+            note = "Đã nén context: \(before / 1000)k → \(after / 1000)k token."
+        } else {
+            note = "Không nén được context (\(clip(failure ?? exitError ?? (stopped ? "đã dừng" : "không rõ"), 200))). Vẫn tiếp tục trên phiên cũ."
+        }
+        update(chatId) {
+            if let after { $0.context = after }
+            $0.activity = ""
+            $0.runningProfile = nil
+            $0.status = $0.pending.isEmpty ? .done : .queued
+            $0.messages.append(Message(.system, note))
+        }
+        if suspended && runningCount == 0 { releaseLock() }
         pump()
     }
 
