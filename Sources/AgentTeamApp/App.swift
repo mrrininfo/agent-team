@@ -198,10 +198,15 @@ final class AppModel {
             box.o = o
             o.cancelTurn = { r.cancel($0) }
             o.antigravityBinary = { r.binary(for: .antigravity, override: box.o?.team.binaryPaths[Provider.antigravity.rawValue]) }
+            if let g = r.graphifyBinary() {
+                let path = r.searchPath
+                o.graphUpdater = { await ProcessRunner.updateGraph(binary: g, workspace: $0, path: path) }
+            }
             close()
             Self.owners[key] = Owner(self)
             orchestrator = o
             if !o.isInstallCheck {
+                o.refreshGraph()
                 o.startInboxPolling()
                 o.pump()
             }

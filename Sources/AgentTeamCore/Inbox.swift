@@ -64,6 +64,8 @@ public struct TeamPaths: Sendable {
     public var chats: URL { root.appendingPathComponent("chats", isDirectory: true) }
     public var notes: URL { root.appendingPathComponent("notes", isDirectory: true) }
     public var lockFile: URL { root.appendingPathComponent("lock") }
+    /// Code graph written by graphify, if the user has it installed.
+    public var graphFile: URL { workspace.appendingPathComponent("graphify-out/graph.json") }
     public var healthFile: URL { root.appendingPathComponent("health.json") }
     /// chatId → process info running that chat's turn; lets a relaunch stop orphans safely.
     public var runningFile: URL { root.appendingPathComponent("running.json") }

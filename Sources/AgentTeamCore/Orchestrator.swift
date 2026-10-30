@@ -58,6 +58,10 @@ public final class Orchestrator {
     @ObservationIgnored var ticks = 0
     /// Path of the `agy` binary, if installed (set by the app); used only to read Antigravity's quota panel.
     @ObservationIgnored public var antigravityBinary: () -> String? = { nil }
+    /// Rebuilds the code graph (graphify); nil when graphify is not installed.
+    @ObservationIgnored public var graphUpdater: ((URL) async -> Bool)?
+    @ObservationIgnored public private(set) var graphBusy = false
+    @ObservationIgnored var graphDirty = false
     /// One probe at a time across all windows: each run drives agy's TUI for ~20 s.
     public static var antigravityProbeRunning = false
     @ObservationIgnored var agyLastAttempt: Date?
@@ -421,6 +425,17 @@ public final class Orchestrator {
             - Số vòng phản biện planner ↔ critic tối đa: \(team.debateRounds ?? 2) (con số này thay cho số vòng ghi trong hợp đồng; người dùng ghi số khác thì theo người dùng).
             """
         }
+        if graphUpdater != nil, FileManager.default.fileExists(atPath: paths.graphFile.path) {
+            s += """
+
+
+            ## Bản đồ code (graphify)
+            - Workspace có đồ thị code `graphify-out/graph.json` (app tự cập nhật sau mỗi lượt có sửa file).
+            - Tìm cấu trúc, ai gọi ai, file nào liên quan: chạy trong workspace `graphify query "<câu hỏi>"`,
+              `graphify explain "<tên hàm/file>"`, `graphify path "A" "B"` trước khi grep hay đọc lần lượt nhiều file.
+            - Đồ thị chỉ để định hướng: đọc file thật trước khi sửa hay kết luận.
+            """
+        }
         s += """
 
 
@@ -609,6 +624,7 @@ public final class Orchestrator {
                 callback(from: c, status: "xong", text: final, turnProfile: profile, turnModel: turnReportedModel)
             }
             scheduleCompact(chatId, profile: profile)
+            if team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.access == .write { refreshGraph() }
         } else if let error, isLimitError(error) {
             team.limitedProviders.insert(profile.provider)
             team.limitedSince[profile.provider.rawValue] = Date()
@@ -652,6 +668,31 @@ public final class Orchestrator {
         }
         recordHealth()
         pump()
+    }
+
+    // MARK: - Code graph
+
+    /// Rebuilds the code graph in the background; calls during a rebuild coalesce into one more run.
+    public func refreshGraph() {
+        guard let update = graphUpdater else { return }
+        if graphBusy { graphDirty = true; return }
+        graphBusy = true
+        excludeGraphFromGit()
+        Task {
+            _ = await update(paths.workspace)
+            graphBusy = false
+            if graphDirty { graphDirty = false; refreshGraph() }
+        }
+    }
+
+    /// Keeps `graphify-out/` out of `git status` (and so out of handoff packages) without touching `.gitignore`.
+    func excludeGraphFromGit() {
+        let f = paths.workspace.appendingPathComponent(".git/info/exclude")
+        guard FileManager.default.fileExists(atPath: paths.workspace.appendingPathComponent(".git").path) else { return }
+        let cur = (try? String(contentsOf: f, encoding: .utf8)) ?? ""
+        guard !cur.split(separator: "\n").contains("graphify-out/") else { return }
+        try? FileManager.default.createDirectory(at: f.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? (cur + (cur.isEmpty || cur.hasSuffix("\n") ? "" : "\n") + "graphify-out/\n").write(to: f, atomically: true, encoding: .utf8)
     }
 
     // MARK: - Compact

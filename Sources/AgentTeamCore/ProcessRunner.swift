@@ -97,6 +97,38 @@ public final class ProcessRunner {
             .first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
+    // MARK: - Code graph
+
+    /// The graphify CLI, if installed (https://github.com/Graphify-Labs/graphify).
+    public func graphifyBinary() -> String? {
+        searchPath.split(separator: ":").map { "\($0)/graphify" }.first { FileManager.default.isExecutableFile(atPath: $0) }
+    }
+
+    /// Rebuilds the workspace's code graph from source with tree-sitter only: no LLM, nothing leaves the machine.
+    /// Returns false on failure or after 5 minutes.
+    nonisolated public static func updateGraph(binary: String, workspace: URL, path: String) async -> Bool {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: binary)
+        p.arguments = ["update", workspace.path]
+        p.currentDirectoryURL = workspace
+        var env = ProcessInfo.processInfo.environment
+        env["PATH"] = path
+        env["GRAPHIFY_BACKEND"] = "none"
+        p.environment = env
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        p.standardInput = FileHandle.nullDevice
+        p.qualityOfService = .utility
+        let done = AsyncStream<Int32> { c in p.terminationHandler = { c.yield($0.terminationStatus); c.finish() } }
+        guard (try? p.run()) != nil else { return false }
+        let pid = p.processIdentifier
+        let timer = Task { try? await Task.sleep(nanoseconds: 300_000_000_000); terminateTree(pid) }
+        var status: Int32 = 1
+        for await s in done { status = s }
+        timer.cancel()
+        return status == 0
+    }
+
     /// Stops the turn's CLI and every command it started: a hung tool command (test, server, build) is usually a
     /// grandchild, and killing only the CLI would leave it running and holding the output pipe open.
     public func cancel(_ chatId: String) {
@@ -287,6 +319,9 @@ public final class ProcessRunner {
         env["PATH"] = ([guardDir?.path, helperDir?.path].compactMap { $0 } + [searchPath]).joined(separator: ":")
         env["AGENTTEAM_CHAT"] = chatId
         env["AGENTTEAM_DIR"] = TeamPaths(workspace: cwd).root.path
+        // Graph queries stay local and must not write outside the workspace (Codex read-only sandbox).
+        env["GRAPHIFY_BACKEND"] = "none"
+        env["GRAPHIFY_QUERY_LOG_DISABLE"] = "1"
         proc.environment = env
         let out = Pipe(), err = Pipe(), inp = Pipe()
         proc.standardOutput = out

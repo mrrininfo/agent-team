@@ -264,9 +264,11 @@ do {
     let g = Provider.antigravity.arguments(TurnRequest(prompt: "hi", profile: Profile(.antigravity), sessionId: "g1", access: .readOnly))
     check(g[0...1] == ["-p", "hi"] && g.suffix(2) == ["--conversation", "g1"], "agy args \(g)")
 
-    // Claude read-only without dispatch -> no Bash tool
+    // Claude read-only without dispatch -> Bash only for graph queries
     let clRO = Provider.claude.arguments(TurnRequest(prompt: "x", profile: Profile(.claude, "opus"), sessionId: nil, access: .readOnly, canDispatch: false))
-    check(clRO.contains("--allowedTools") && !clRO.joined().contains("Bash"), "claude read-only without dispatch omits Bash tool")
+    let roBash = clRO.joined(separator: ",").split(separator: ",").filter { $0.hasPrefix("Bash") }
+    check(clRO.contains("--allowedTools") && !roBash.isEmpty && roBash.allSatisfy { $0.hasPrefix("Bash(graphify ") },
+          "claude read-only without dispatch gets Bash only for graph queries")
 
     // Claude read-only with dispatch -> includes Bash agentteam
     let clRODispatch = Provider.claude.arguments(TurnRequest(prompt: "x", profile: Profile(.claude, "opus"), sessionId: nil, access: .readOnly, canDispatch: true))
@@ -955,7 +957,44 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+// Code graph: a write turn rebuilds it (calls coalesce), then agents are told to query it
+@MainActor func graphScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-graph-\(shortId())")
+    try FileManager.default.createDirectory(at: dir.appendingPathComponent(".git"), withIntermediateDirectories: true)
+    var prompts: [String] = []
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        prompts.append(req.prompt)
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    var builds = 0
+    o.graphUpdater = { ws in
+        builds += 1
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let f = TeamPaths(workspace: ws).graphFile
+        try? FileManager.default.createDirectory(at: f.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? Data("{}".utf8).write(to: f)
+        return true
+    }
+    o.refreshGraph(); o.refreshGraph(); o.refreshGraph()
+    for _ in 0..<100 where o.graphBusy || builds < 2 { try? await Task.sleep(nanoseconds: 10_000_000) }
+    check(builds == 2, "graph rebuild requests during a build coalesce into one more run")
+    let exclude = (try? String(contentsOf: dir.appendingPathComponent(".git/info/exclude"), encoding: .utf8)) ?? ""
+    check(exclude == "graphify-out/\n", "graphify-out is kept out of git status")
+    let worker = o.team.agents.first { $0.roleId == "worker" }!
+    let w = o.newChat(agentId: worker.id, title: "w")
+    o.send("sửa", to: w)
+    for _ in 0..<300 where o.chat(w)?.status != .done || o.graphBusy { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(builds == 3 && prompts.last?.contains("graphify query") == true, "write turn refreshes the graph and agents are told to query it")
+    let ro = Provider.claude.arguments(TurnRequest(prompt: "", profile: Profile(.claude, ""), sessionId: nil, access: .readOnly))
+    check(ro.contains { $0.contains("Bash(graphify query:*)") } && !ro.contains { $0.contains("Bash(graphify:*)") },
+          "read-only Claude may query the graph but not run other graphify commands")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await graphScenario()
 try await compactScenario()
 try await outputCapScenario()
 try await badModelScenario()

@@ -53,9 +53,11 @@ extension Provider {
             if r.access == .write {
                 a += ["--dangerously-skip-permissions"]
             } else {
+                // Read-only graph lookups (graphify) are allowed; graphify's write commands are not.
+                let graph = "Bash(graphify query:*),Bash(graphify explain:*),Bash(graphify path:*)"
                 let tools = r.canDispatch
-                    ? "Read,Grep,Glob,LS,WebFetch,WebSearch,Bash(agentteam:*),Bash(agentteam *)"
-                    : "Read,Grep,Glob,LS,WebFetch,WebSearch"
+                    ? "Read,Grep,Glob,LS,WebFetch,WebSearch,Bash(agentteam:*),Bash(agentteam *),\(graph)"
+                    : "Read,Grep,Glob,LS,WebFetch,WebSearch,\(graph)"
                 a += ["--allowedTools", tools]
             }
             return a

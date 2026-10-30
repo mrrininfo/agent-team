@@ -146,7 +146,7 @@ struct PreviewPane: View {
 
     nonisolated static func scan(_ root: URL) -> [URL] {
         do {
-            let skip: Set<String> = [".git", ".build", "node_modules", "DerivedData", "dist", ".swiftpm", "Pods", ".venv", "__pycache__"]
+            let skip: Set<String> = [".git", ".build", "node_modules", "DerivedData", "dist", ".swiftpm", "Pods", ".venv", "__pycache__", "graphify-out"]
             let teamDirs: Set<String> = ["reports", "decisions", "attachments", "notes"]
             var found: [(URL, Date)] = []
             guard let e = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
