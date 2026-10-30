@@ -97,6 +97,8 @@ struct MainView: View {
                             .help("Chat mới với agent này")
                         }
                     }
+                    // The sidebar list adds its own hover chevron to section headers; the name block toggles instead.
+                    .collapsible(false)
                 }
             }
             .navigationSplitViewColumnWidth(min: 230, ideal: 270)
