@@ -16,6 +16,8 @@ struct MainView: View {
     @State private var preview = PreviewState()
     @State private var nameDraft = ""
     @State private var collapsed: Set<String> = []
+    @State private var searchShown = false
+    @State private var focusMessage: UUID?
     @FocusState private var editingName: Bool
 
     var displayName: String { o.team.name ?? o.paths.workspace.lastPathComponent }
@@ -135,7 +137,7 @@ struct MainView: View {
                 }
                 Group {
                     switch selection {
-                    case .chat(let id): ChatView(o: o, chatId: id).id(id)
+                    case .chat(let id): ChatView(o: o, chatId: id, focus: focusMessage).id(id)
                     default: TeamView(o: o)
                     }
                 }
@@ -157,6 +159,18 @@ struct MainView: View {
         .navigationTitle(displayName)
         .navigationSubtitle(o.paths.workspace.path)
         .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button { searchShown.toggle() } label: { Label("Tìm", systemImage: "magnifyingglass") }
+                    .keyboardShortcut("f", modifiers: .command)
+                    .help("Tìm theo từ khoá trong mọi chat của dự án (⌘F)")
+                    .popover(isPresented: $searchShown, arrowEdge: .bottom) {
+                        SearchPanel(o: o) { hit in
+                            focusMessage = hit.messageId
+                            selection = .chat(hit.chatId)
+                            searchShown = false
+                        }
+                    }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Text("\(o.runningCount) đang chạy · \(o.chats.filter { $0.status == .queued }.count) chờ · \(o.totalTokens.formatted()) token")
                     .font(.caption).foregroundStyle(.secondary)
@@ -167,15 +181,15 @@ struct MainView: View {
             }
             ToolbarItem(placement: .primaryAction) {
                 Menu {
-                    Button("Mở dự án trong cửa sổ mới…") {
+                    Button("Mở dự án trong tab mới…") {
                         if let url = AppModel.pickFolder() { openWindow(value: url.standardizedFileURL.path) }
                     }
-                    Menu("Gần đây (cửa sổ mới)") {
+                    Menu("Gần đây (tab mới)") {
                         ForEach(AppModel.recent.filter { $0 != o.paths.workspace.standardizedFileURL.path }, id: \.self) { p in
                             Button(AppModel.displayName(p)) { openWindow(value: p) }
                         }
                     }
-                    Button("Đổi dự án ở cửa sổ này…") { model.chooseWorkspace() }
+                    Button("Đổi dự án ở tab này…") { model.chooseWorkspace() }
                     Button("Hiện trong Finder") { NSWorkspace.shared.activateFileViewerSelecting([o.paths.workspace]) }
                     Divider()
                     Button("Đóng dự án") { model.close() }
@@ -184,5 +198,50 @@ struct MainView: View {
                 .help("Đang mở: \(o.paths.workspace.path). Mở song song dự án khác: ⌘O.")
             }
         }
+    }
+}
+
+/// Keyword search across the project's chats; picking a hit opens that chat at the message.
+struct SearchPanel: View {
+    let o: Orchestrator
+    let onPick: (ChatSearch.Hit) -> Void
+    @State private var query = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        let hits = ChatSearch.find(query, in: o.chats)
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("Tìm trong mọi chat (không phân biệt dấu)", text: $query)
+                .textFieldStyle(.roundedBorder).focused($focused)
+                .onSubmit { if let h = hits.first { onPick(h) } }
+            if query.trimmingCharacters(in: .whitespaces).count >= 2 {
+                Text(hits.isEmpty ? "Không tìm thấy" : "\(hits.count)\(hits.count == 200 ? "+" : "") kết quả")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            List(hits) { h in
+                Button { onPick(h) } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text(label(h)).font(.caption.bold()).lineLimit(1)
+                            Spacer()
+                            if let d = h.date { Text(d, format: .dateTime.day().month().hour().minute()).font(.caption2).foregroundStyle(.tertiary) }
+                        }
+                        Text(h.snippet).font(.callout).lineLimit(3).foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .listStyle(.plain)
+        }
+        .padding(12)
+        .frame(width: 460, height: 420)
+        .onAppear { focused = true }
+    }
+
+    func label(_ h: ChatSearch.Hit) -> String {
+        let c = o.chat(h.chatId)
+        let role = c.flatMap { o.team.agent($0.agentId) }.flatMap { o.team.role($0.roleId) }?.name ?? ""
+        return "\(role) · \(c?.title ?? h.chatId)"
     }
 }

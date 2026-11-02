@@ -5,6 +5,8 @@ import SwiftUI
 struct ChatView: View {
     @Bindable var o: Orchestrator
     let chatId: String
+    /// Message to scroll to and outline (picked from search).
+    var focus: UUID? = nil
     @Environment(PreviewState.self) private var preview
     @Environment(AppModel.self) private var model
     @State private var draft = ""
@@ -15,6 +17,14 @@ struct ChatView: View {
     @State private var shown = ChatView.page
     static let page = 30
     @State private var pasteMonitor: Any?
+
+    /// Widens the visible tail to include the focused message, then scrolls to it once it is laid out.
+    @discardableResult func scrollToFocus(_ c: Chat, _ proxy: ScrollViewProxy) -> Bool {
+        guard let f = focus, let i = c.messages.firstIndex(where: { $0.id == f }) else { return false }
+        shown = max(shown, c.messages.count - i)
+        DispatchQueue.main.async { proxy.scrollTo(f, anchor: .center) }
+        return true
+    }
 
     var body: some View {
         if let c = o.chat(chatId), let i = o.team.agents.firstIndex(where: { $0.id == c.agentId }) {
@@ -33,7 +43,7 @@ struct ChatView: View {
                                 }
                                 .buttonStyle(.link).font(.caption)
                             }
-                            ForEach(c.messages.suffix(shown)) { MessageRow(m: $0, root: o.paths.workspace) }
+                            ForEach(c.messages.suffix(shown)) { MessageRow(m: $0, root: o.paths.workspace, highlighted: $0.id == focus) }
                             if !c.activity.isEmpty {
                                 HStack(spacing: 8) {
                                     ProgressView().controlSize(.small)
@@ -62,7 +72,8 @@ struct ChatView: View {
                         .padding()
                     }
                     .onChange(of: c.messages.count) { proxy.scrollTo("end") }
-                    .onAppear { proxy.scrollTo("end") }
+                    .onChange(of: focus) { scrollToFocus(c, proxy) }
+                    .onAppear { if !scrollToFocus(c, proxy) { proxy.scrollTo("end") } }
                 }
                 // Links in messages (reports, attachments, file paths) open in the preview pane.
                 .environment(\.openURL, OpenURLAction { url in
@@ -261,6 +272,7 @@ struct ChatView: View {
 struct MessageRow: View {
     let m: Message
     let root: URL
+    var highlighted = false
 
     var label: String {
         switch m.kind {
@@ -311,6 +323,7 @@ struct MessageRow: View {
                 }
                 .padding(10)
                 .background(RoundedRectangle(cornerRadius: 12).fill(background))
+                .overlay { if highlighted { RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor, lineWidth: 2) } }
             }
             if !mine { Spacer(minLength: 40) }
         }

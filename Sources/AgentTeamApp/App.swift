@@ -19,8 +19,8 @@ struct AgentTeamApp: App {
     static var sigterm: DispatchSourceSignal?
 
     var body: some Scene {
-        // One window = one project. A window opened for a path (openWindow(value:)) opens that project;
-        // ⌘N gives an empty window that reopens the most recent free project.
+        // One window (tab) = one project. A window opened for a path (openWindow(value:)) opens that project;
+        // ⌘N/⌘T gives an empty tab that reopens the most recent free project.
         WindowGroup("Agent Team", for: String.self) { $path in
             WindowRoot(path: path).frame(minWidth: 980, minHeight: 600)
         }
@@ -33,7 +33,7 @@ struct OpenProjectCommands: Commands {
 
     var body: some Commands {
         CommandGroup(after: .newItem) {
-            Button("Mở dự án trong cửa sổ mới…") {
+            Button("Mở dự án trong tab mới…") {
                 if let url = AppModel.pickFolder() { openWindow(value: url.standardizedFileURL.path) }
             }
             .keyboardShortcut("o")
@@ -70,7 +70,15 @@ struct WindowAccessor: NSViewRepresentable {
         let v = NSView()
         DispatchQueue.main.async { [model, path] in
             guard let w = v.window, model.window == nil else { return }
-            restoreFrame(w)
+            // Projects open as tabs of one window, like browser tabs, instead of separate windows.
+            w.tabbingIdentifier = "project"
+            w.tabbingMode = .preferred
+            if let host = NSApp.windows.first(where: { $0 !== w && $0.isVisible && $0.tabbingIdentifier == "project" }) {
+                host.addTabbedWindow(w, ordered: .above)
+                w.makeKeyAndOrderFront(nil)
+            } else {
+                restoreFrame(w)
+            }
             model.attached(to: w, path: path)
             let nc = NotificationCenter.default
             let save = { (_: Notification) in
@@ -258,7 +266,7 @@ struct RootView: View {
             VStack(spacing: 16) {
                 Image(systemName: "person.3.sequence").font(.system(size: 48)).foregroundStyle(.secondary)
                 Text("Agent Team").font(.largeTitle.bold())
-                Text("Chọn thư mục dự án. Mỗi dự án có team và lịch sử chat riêng trong <dự án>/.agentteam.\nMở thêm dự án song song: File → Mở dự án trong cửa sổ mới (⌘O).")
+                Text("Chọn thư mục dự án. Mỗi dự án có team và lịch sử chat riêng trong <dự án>/.agentteam.\nMở thêm dự án song song: File → Mở dự án trong tab mới (⌘O).")
                     .multilineTextAlignment(.center).foregroundStyle(.secondary)
                 Button("Mở dự án…") { model.chooseWorkspace() }.buttonStyle(.borderedProminent)
                 let _ = model.recentVersion

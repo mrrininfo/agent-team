@@ -1188,6 +1188,17 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+do {
+    var a = Chat(agentId: "lead", title: "Chiến lược bắt sóng")
+    a.messages = [Message(.user, "Hãy kiểm tra TradingView MCP"), Message(.assistant, String(repeating: "x", count: 300) + " Tiếp tục chạy backtest " + String(repeating: "y", count: 300))]
+    let b = Chat(agentId: "worker", title: "w")
+    let hits = ChatSearch.find("tiep tuc", in: [a, b])
+    check(hits.count == 1 && hits[0].chatId == a.id && hits[0].messageId == a.messages[1].id, "search ignores case and Vietnamese accents")
+    check(hits[0].snippet.hasPrefix("…") && hits[0].snippet.hasSuffix("…") && hits[0].snippet.count < 200, "search snippet is a short window around the match")
+    check(ChatSearch.find("bat song", in: [a, b]).first?.messageId == nil, "search matches chat titles")
+    check(ChatSearch.find("t", in: [a, b]).isEmpty, "one-letter query returns nothing")
+}
+
 try await scenario()
 try await eventBurstScenario()
 try await stuckAgySessionScenario()
