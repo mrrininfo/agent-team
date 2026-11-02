@@ -57,6 +57,11 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
 14. **Thuật ngữ chung**: `GLOSSARY.md` ở gốc dự án được gửi cho mọi vai trò; vai trò được ghi tự thêm thuật ngữ mới,
     vai trò chỉ đọc đề xuất ở cuối báo cáo. Bạn có thể tự sửa file này bất cứ lúc nào.
 
+15. **Nhiều tài khoản / API key**: Team & Provider → "+ Đăng nhập tài khoản khác" hoặc "+ Thêm API key". Tài khoản mặc định hết
+    limit thì tự dùng tài khoản kế tiếp cùng provider rồi mới tới fallback. API key nằm trong Keychain, có giới hạn token/ngày.
+    Muse: thêm API key cho Claude Code với máy chủ `https://api.meta.ai`, rồi chọn tài khoản đó ở vị trí cần dùng.
+16. **Tab dự án, Tìm (⌘F), nói thay gõ**: dự án mở thành tab; 🔍 tìm từ khoá trong mọi chat; 🎙 dùng Đọc chính tả của macOS.
+
 ## Tiết kiệm token
 - Toolbar hiện tổng token, header của mỗi chat hiện token riêng (input không cache + output).
 - Resume session của provider, nên hợp đồng và roster chỉ gửi ở lượt đầu.

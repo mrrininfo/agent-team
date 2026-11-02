@@ -322,6 +322,7 @@ public final class ProcessRunner {
         // Graph queries stay local and must not write outside the workspace (Codex read-only sandbox).
         env["GRAPHIFY_BACKEND"] = "none"
         env["GRAPHIFY_QUERY_LOG_DISABLE"] = "1"
+        env.merge(AccountStore.environment(request.profile.account)) { $1 }
         proc.environment = env
         let out = Pipe(), err = Pipe(), inp = Pipe()
         proc.standardOutput = out
@@ -514,11 +515,11 @@ extension Provider {
 
 extension ProcessRunner {
     /// Runs the provider's status command off the main thread, giving up after 30 s.
-    public func accountStatus(_ provider: Provider, override: String?) async -> AccountStatus {
+    public func accountStatus(_ provider: Provider, override: String?, account: String? = nil) async -> AccountStatus {
         guard let bin = binary(for: provider, override: override) else {
             return AccountStatus(ok: false, detail: "không tìm thấy lệnh \(provider.binaryName)")
         }
-        let env = ["PATH": searchPath, "HOME": NSHomeDirectory()]
+        let env = ["PATH": searchPath, "HOME": NSHomeDirectory()].merging(AccountStore.environment(account)) { $1 }
         return await Task.detached {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: bin)

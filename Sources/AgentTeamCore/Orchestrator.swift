@@ -297,6 +297,7 @@ public final class Orchestrator {
         team.limitedProviders.remove(p)
         team.limitedSince[p.rawValue] = nil
         team.limitedUntil?[p.rawValue] = nil
+        team.limitedAccounts = team.limitedAccounts?.filter { AccountStore.find($0.key)?.provider != p }
         retryLimited()
     }
 
@@ -311,12 +312,16 @@ public final class Orchestrator {
             team.limitedModels = models.filter { $0.value > now }
             retryLimited()
         }
+        if let accts = team.limitedAccounts, accts.values.contains(where: { $0 <= now }) {
+            team.limitedAccounts = accts.filter { $0.value > now }
+            retryLimited()
+        }
     }
 
     /// When a provider's limit lifts: the time in its error message, else the reset of a quota window that is used up,
     /// else nil (retry after the cooldown). A minute is added so the retry lands after the reset.
-    func limitReset(_ provider: Provider, error: String, now: Date = Date()) -> Date? {
-        let fromQuota = quotas[provider.rawValue]?.windows.filter { $0.usedPercent >= 99 }.compactMap(\.resetsAt).max()
+    func limitReset(_ profile: Profile, error: String, now: Date = Date()) -> Date? {
+        let fromQuota = quotas[profile.quotaKey]?.windows.filter { $0.usedPercent >= 99 }.compactMap(\.resetsAt).max()
         guard let d = limitResetDate(error, now: now) ?? fromQuota, d > now, d < now.addingTimeInterval(8 * 86400) else { return nil }
         return d.addingTimeInterval(60)
     }
@@ -556,7 +561,7 @@ public final class Orchestrator {
         var firstSignal: TimeInterval?
         // Progress and token events arrive in bursts; applying each one re-saved the whole chat and redrew the
         // window per event, freezing the UI for a minute. Buffer them and apply at most once a second.
-        var lines: [String] = [], tokens = 0, lastFlush = Date.distantPast, flushScheduled = false
+        var lines: [String] = [], tokens = 0, turnTokens = 0, lastFlush = Date.distantPast, flushScheduled = false
         func flush() {
             guard !lines.isEmpty || tokens > 0 else { return }
             let l = lines, n = tokens
@@ -593,9 +598,10 @@ public final class Orchestrator {
                 buffered()
             case .usage(let n):
                 tokens += max(0, n)
+                turnTokens += max(0, n)
                 buffered()
             case .quota(let w):
-                self?.quotas[profile.provider.rawValue] = ProviderQuota(windows: w, updated: Date())
+                self?.quotas[profile.quotaKey] = ProviderQuota(windows: w, updated: Date())
                 if let q = self?.quotas { Quota.save(q) }
             case .modelMetadata(let m):
                 turnReportedModel = m
@@ -609,6 +615,12 @@ public final class Orchestrator {
             }
         }
         flush()
+        if let acct = profile.account, AccountStore.addUsage(acct, tokens: turnTokens) {
+            // Daily token cap reached (API account): park it until midnight; later turns rotate to the next account.
+            let midnight = Calendar.current.startOfDay(for: Date()).addingTimeInterval(86400)
+            team.limitedAccounts = (team.limitedAccounts ?? [:]).merging([acct: midnight]) { $1 }
+            update(chatId) { $0.messages.append(Message(.system, "\(profile.label) đã dùng hết hạn mức token trong ngày; tạm nghỉ tới 0 giờ.")) }
+        }
         let timing = TurnTiming(firstSignal: firstSignal, total: Date().timeIntervalSince(started), provider: profile.label)
         update(chatId) { $0.lastTiming = timing }
         logTiming(chatId, role: role.name, timing, ok: final != nil)
@@ -678,12 +690,16 @@ public final class Orchestrator {
             scheduleCompact(chatId, profile: profile)
             if team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.access == .write { refreshGraph() }
         } else if let error, isLimitError(error) {
-            let until = limitReset(profile.provider, error: error)
+            let until = limitReset(profile, error: error)
             let who: String
             if profile.provider == .antigravity {
                 // Per-model quota: park only this model; the role's other Antigravity models stay usable.
                 let cooldown = Date().addingTimeInterval(TimeInterval(team.limitCooldownMinutes * 60))
                 team.limitedModels = (team.limitedModels ?? [:]).merging([profile.modelKey: until ?? cooldown]) { $1 }
+                who = profile.label
+            } else if let acct = profile.account {
+                let cooldown = Date().addingTimeInterval(TimeInterval(team.limitCooldownMinutes * 60))
+                team.limitedAccounts = (team.limitedAccounts ?? [:]).merging([acct: until ?? cooldown]) { $1 }
                 who = profile.label
             } else {
                 team.limitedProviders.insert(profile.provider)

@@ -45,18 +45,24 @@ public struct Profile: Codable, Hashable, Sendable {
     public var provider: Provider
     public var model: String
     public var effort: String
+    /// `Account.id` to run under; nil = the CLI's own login. A session started under one account is not resumed under another.
+    public var account: String?
 
-    public init(_ provider: Provider, _ model: String = "", effort: String = "") {
+    public init(_ provider: Provider, _ model: String = "", effort: String = "", account: String? = nil) {
         self.provider = provider
         self.model = model
         self.effort = effort
+        self.account = account
     }
 
-    /// Provider + model, the unit a "model not found" error applies to.
-    public var modelKey: String { "\(provider.rawValue)|\(model)" }
+    /// Provider + model (+ account), the unit a "model not found" or per-model quota applies to.
+    public var modelKey: String { "\(provider.rawValue)|\(model)" + (account.map { "#\($0)" } ?? "") }
+    /// Key of this account's quota windows in `Orchestrator.quotas`.
+    public var quotaKey: String { provider.rawValue + (account.map { "#\($0)" } ?? "") }
 
     public var label: String {
-        [provider.title, model.isEmpty ? "mặc định" : model, effort].filter { !$0.isEmpty }.joined(separator: " · ")
+        [provider.title, model.isEmpty ? "mặc định" : model, effort, account.map { AccountStore.find($0)?.label ?? "tk \($0)" } ?? ""]
+            .filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
 
@@ -300,6 +306,8 @@ public struct Team: Codable, Sendable {
     /// `Profile.modelKey` → when its quota resets. Antigravity's quota is per model (Gemini Flash can be used up while
     /// gemini-argon still runs), so only that model is skipped and the role's other Antigravity fallbacks keep working.
     public var limitedModels: [String: Date]?
+    /// `Account.id` → when that extra account's limit (or daily token cap) lifts. The default account uses `limitedProviders`.
+    public var limitedAccounts: [String: Date]?
     public var limitCooldownMinutes = 30
     /// Provider rawValue → absolute binary path; empty means auto-detect from the login shell PATH.
     public var binaryPaths: [String: String] = [:]
@@ -329,12 +337,18 @@ public struct Team: Codable, Sendable {
     public func agent(_ id: String) -> Agent? { agents.first { $0.id == id } }
 
     public func usable(_ p: Profile) -> Bool {
-        !disabledProviders.contains(p.provider) && !limitedProviders.contains(p.provider) && !(badModels ?? []).contains(p.modelKey)
+        let accountFree = p.account.map { id in AccountStore.find(id)?.enabled == true && limitedAccounts?[id] == nil }
+            ?? !limitedProviders.contains(p.provider)
+        return !disabledProviders.contains(p.provider) && accountFree && !(badModels ?? []).contains(p.modelKey)
             && limitedModels?[p.modelKey] == nil
     }
 
+    /// Each profile on the default account, then on the provider's other accounts in order, before the next fallback.
     public func effectiveProfile(for agent: Agent) -> Profile? {
-        ([agent.profile] + (role(agent.roleId)?.fallbacks ?? [])).first(where: usable)
+        ([agent.profile] + (role(agent.roleId)?.fallbacks ?? [])).lazy.flatMap { p -> [Profile] in
+            guard p.account == nil else { return [p] }
+            return [p] + AccountStore.rotation(p.provider).map { a in var q = p; q.account = a.id; return q }
+        }.first(where: usable)
     }
 
     public func roster() -> String {

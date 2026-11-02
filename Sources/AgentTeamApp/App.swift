@@ -10,6 +10,7 @@ struct AgentTeamApp: App {
         signal(SIGTERM, SIG_IGN)
         // A CLI that exits before reading its whole stdin must fail that write, not kill the app (default SIGPIPE).
         signal(SIGPIPE, SIG_IGN)
+        AccountStore.load()
         let src = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         src.setEventHandler { NSApp.terminate(nil) }
         src.resume()

@@ -10,6 +10,7 @@ struct TeamView: View {
     @State private var bulkTo = Profile(.codex, "gpt-6.1-sol")
     @State private var newRoleName = ""
     @State private var pendingSetup: (title: String, setup: TeamSetup)?
+    @State private var addingKey: Provider?
     private var accounts: Accounts { Accounts.shared }
 
     var body: some View {
@@ -23,6 +24,7 @@ struct TeamView: View {
         }
         .formStyle(.grouped)
         .task { await accounts.refresh(o.team.binaryPaths) }
+        .sheet(item: $addingKey) { p in AddKeySheet(provider: p) { accounts.add($0, key: $1) } }
         .confirmationDialog("Chuyển sang bộ \(pendingSetup?.title ?? "")?", isPresented: Binding(
             get: { pendingSetup != nil }, set: { if !$0 { pendingSetup = nil } })) {
             Button("Chuyển, bỏ thay đổi chưa lưu", role: .destructive) {
@@ -45,14 +47,64 @@ struct TeamView: View {
         }
     }
 
-    func openTerminal(_ p: Provider, login: Bool) {
+    /// `account` nil = the CLI's own login; else that extra account's config folder is exported first.
+    func openTerminal(_ p: Provider, login: Bool, account: String? = nil) {
         guard let bin = model.runner.binary(for: p, override: o.team.binaryPaths[p.rawValue]) else { return }
         // A .command file opens in Terminal without asking for permission to control Terminal.
-        let file = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-\(p.rawValue)-\(login ? "login" : "logout").command")
-        try? "#!/bin/zsh\n\(p.accountCommand(bin, login: login))\n".write(to: file, atomically: true, encoding: .utf8)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-\(p.rawValue)-\(account ?? "main")-\(login ? "login" : "logout").command")
+        let exports = AccountStore.environment(account).map { "export \($0.key)='\($0.value.replacingOccurrences(of: "'", with: "'\\''"))'" }.joined(separator: "\n")
+        try? "#!/bin/zsh\n\(exports)\n\(p.accountCommand(bin, login: login))\n".write(to: file, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
         NSWorkspace.shared.open(file)
-        accounts.watch(p, o.team.binaryPaths)
+        if let account { accounts.watchAccount(account, p, o.team.binaryPaths) } else { accounts.watch(p, o.team.binaryPaths) }
+    }
+
+    /// Further accounts of one provider, tried in this order after the default one hits its limit.
+    @ViewBuilder func extraAccounts(_ p: Provider) -> some View {
+        ForEach(accounts.list.filter { $0.provider == p }) { a in
+            HStack(spacing: 6) {
+                Circle().fill(accountColor(a)).frame(width: 8, height: 8)
+                    .help(o.team.limitedAccounts?[a.id].map { "Đang bị limit, tự thử lại lúc \($0.formatted(date: .abbreviated, time: .shortened))" }
+                          ?? (a.kind == .apiKey ? "API key" : accounts.extraStatus[a.id]?.detail ?? "Đang kiểm tra…"))
+                TextField("", text: Binding(get: { a.label }, set: { v in accounts.update(a.id) { $0.label = v } }))
+                    .textFieldStyle(.plain).frame(width: 140)
+                Text(a.kind == .login ? "đăng nhập" : (a.baseURL ?? "").isEmpty ? "API key" : "API · \(a.baseURL!)")
+                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if a.kind == .apiKey {
+                    TextField("", value: Binding(get: { a.dailyTokenCap }, set: { v in accounts.update(a.id) { $0.dailyTokenCap = v } }),
+                              format: .number, prompt: Text("token/ngày"))
+                        .labelsHidden().frame(width: 90)
+                        .help("Tối đa bấy nhiêu token mỗi ngày rồi tạm nghỉ tới 0 giờ (để trống = không giới hạn)")
+                }
+                Spacer()
+                if a.kind == .login {
+                    Button("Login") { openTerminal(p, login: true, account: a.id) }
+                    Button("Logout") { openTerminal(p, login: false, account: a.id) }
+                }
+                Button { accounts.move(a.id, by: -1) } label: { Image(systemName: "arrow.up") }.buttonStyle(.borderless)
+                    .help("Dùng trước tài khoản phía trên")
+                Button { accounts.remove(a.id) } label: { Image(systemName: "trash") }.buttonStyle(.borderless)
+                    .help("Xoá tài khoản này (thư mục đăng nhập và key của nó)")
+                Toggle("", isOn: Binding(get: { a.enabled }, set: { v in accounts.update(a.id) { $0.enabled = v } })).labelsHidden()
+            }
+            .padding(.leading, 18)
+        }
+        HStack {
+            Button("+ Đăng nhập tài khoản khác") { openTerminal(p, login: true, account: accounts.add(Account(provider: p, label: "\(p.title) \(accounts.list.filter { $0.provider == p }.count + 2)", kind: .login), key: nil)) }
+            if p != .antigravity { Button("+ Thêm API key") { addingKey = p } }
+        }
+        .buttonStyle(.link).font(.caption).padding(.leading, 18)
+    }
+
+    func accountColor(_ a: Account) -> Color {
+        if !a.enabled || o.team.disabledProviders.contains(a.provider) { return .gray }
+        if o.team.limitedAccounts?[a.id] != nil { return .orange }
+        if a.kind == .apiKey { return .green }
+        switch accounts.extraStatus[a.id]?.ok {
+        case true?: return .green
+        case false?: return .red
+        case nil: return .gray
+        }
     }
 
     var providers: some View {
@@ -114,6 +166,7 @@ struct TeamView: View {
                         .labelsHidden().frame(width: 220)
                         Button("Chọn…") { pickBinary(p) }
                     }
+                    extraAccounts(p)
                 }
             }
         }
@@ -303,9 +356,81 @@ final class Accounts {
     var status: [Provider: AccountStatus] = [:]
     @ObservationIgnored var watching: [Provider: Task<Void, Never>] = [:]
 
+    /// Mirror of `AccountStore.accounts` so the UI redraws when it changes.
+    var list: [Account] = AccountStore.accounts
+    var extraStatus: [String: AccountStatus] = [:]
+
     func refresh(_ paths: [String: String]) async {
         for p in Provider.allCases {
             status[p] = await AppModel.runner.accountStatus(p, override: paths[p.rawValue])
+        }
+        for a in list where a.kind == .login {
+            extraStatus[a.id] = await AppModel.runner.accountStatus(a.provider, override: paths[a.provider.rawValue], account: a.id)
+        }
+    }
+
+    private func commit(_ new: [Account]) {
+        AccountStore.accounts = new
+        AccountStore.save()
+        list = new
+    }
+
+    /// Adds the account (and stores its key in the Keychain); returns its id.
+    @discardableResult func add(_ a: Account, key: String?) -> String {
+        commit(list + [a])
+        if let key, !key.isEmpty {
+            Keychain.save(key, for: a.id)
+            // Codex reads its key from CODEX_HOME/auth.json: sign that folder in with the key once.
+            if a.provider == .codex, let bin = AppModel.runner.binary(for: .codex, override: nil) {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: bin)
+                p.arguments = ["login", "--with-api-key"]
+                p.environment = ProcessInfo.processInfo.environment.merging(AccountStore.environment(a.id)) { $1 }
+                let inp = Pipe()
+                p.standardInput = inp
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                if (try? p.run()) != nil {
+                    try? inp.fileHandleForWriting.write(contentsOf: Data((key + "\n").utf8))
+                    try? inp.fileHandleForWriting.close()
+                }
+            }
+        }
+        return a.id
+    }
+
+    func update(_ id: String, _ f: (inout Account) -> Void) {
+        var new = list
+        guard let i = new.firstIndex(where: { $0.id == id }) else { return }
+        f(&new[i])
+        commit(new)
+    }
+
+    func remove(_ id: String) {
+        AccountStore.remove(id)
+        list = AccountStore.accounts
+    }
+
+    /// Moves the account up among those of its provider.
+    func move(_ id: String, by d: Int) {
+        var new = list
+        guard let i = new.firstIndex(where: { $0.id == id }),
+              let j = (d < 0 ? new[..<i].lastIndex { $0.provider == new[i].provider } : new[(i + 1)...].firstIndex { $0.provider == new[i].provider })
+        else { return }
+        new.swapAt(i, j)
+        commit(new)
+    }
+
+    /// After an extra account's Login/Logout: re-check every 5 s for 3 minutes.
+    func watchAccount(_ id: String, _ p: Provider, _ paths: [String: String]) {
+        Task {
+            let before = extraStatus[id]?.ok
+            for _ in 0..<36 {
+                try? await Task.sleep(for: .seconds(5))
+                let s = await AppModel.runner.accountStatus(p, override: paths[p.rawValue], account: id)
+                extraStatus[id] = s
+                if s.ok != before { return }
+            }
         }
     }
 
@@ -322,5 +447,52 @@ final class Accounts {
                 if s.ok != before?.ok { return }
             }
         }
+    }
+}
+
+
+/// New API-key account; for Claude Code it can point at another Anthropic-compatible service (e.g. Muse on Meta's Model API).
+struct AddKeySheet: View {
+    let provider: Provider
+    let onAdd: (Account, String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var label = ""
+    @State private var key = ""
+    @State private var baseURL = ""
+    @State private var cap: Int?
+
+    var body: some View {
+        Form {
+            Text("Thêm API key cho \(provider.title)").font(.headline)
+            TextField("Tên hiển thị", text: $label, prompt: Text(provider == .claude ? "vd. Anthropic API, Muse" : "vd. OpenAI API"))
+            SecureField("API key", text: $key)
+            if provider == .claude {
+                TextField("Máy chủ (để trống = Anthropic)", text: $baseURL, prompt: Text("https://api.meta.ai"))
+                Button("Điền sẵn cho Muse (Meta Model API)") {
+                    baseURL = "https://api.meta.ai"
+                    if label.isEmpty { label = "Muse" }
+                }
+                .buttonStyle(.link)
+                Text("Có máy chủ riêng thì tài khoản không tự xoay vòng: chọn nó ở ô tài khoản của vị trí/fallback và điền model của dịch vụ đó (vd. muse-spark-1.2).")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            TextField("Token tối đa mỗi ngày", value: $cap, format: .number, prompt: Text("để trống = không giới hạn"))
+            Text("Dùng API là trả tiền theo token: nên đặt giới hạn khi chạy qua đêm. Key được cất trong Keychain của macOS.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Huỷ") { dismiss() }
+                Button("Thêm") {
+                    let url = baseURL.trimmingCharacters(in: .whitespaces)
+                    onAdd(Account(provider: provider, label: label.isEmpty ? "\(provider.title) API" : label, kind: .apiKey,
+                                  baseURL: url.isEmpty ? nil : url, dailyTokenCap: cap), key.trimmingCharacters(in: .whitespacesAndNewlines))
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .formStyle(.grouped)
+        .frame(width: 460)
     }
 }

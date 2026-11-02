@@ -388,6 +388,15 @@ struct ProfileEditor: View {
             }
             .labelsHidden().frame(width: 125)
             .disabled(profile.provider.efforts.count < 2)
+            // Accounts on another service (e.g. Muse) are only used when chosen here; the rest rotate on their own.
+            let pinned = Accounts.shared.list.filter { $0.provider == profile.provider && !($0.baseURL ?? "").isEmpty }
+            if !pinned.isEmpty || profile.account != nil {
+                Picker("", selection: $profile.account) {
+                    Text("tài khoản mặc định").tag(String?.none)
+                    ForEach(Accounts.shared.list.filter { $0.provider == profile.provider }) { Text($0.label).tag(Optional($0.id)) }
+                }
+                .labelsHidden().frame(width: 130)
+            }
         }
     }
 }

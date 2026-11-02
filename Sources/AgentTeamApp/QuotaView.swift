@@ -68,6 +68,12 @@ struct QuotaPanel: View {
                             }
                         }
                         Text("Cập nhật \(q.updated.formatted(Date.RelativeFormatStyle(presentation: .named, locale: vi)))").font(.caption2).foregroundStyle(.tertiary)
+                        ForEach(Accounts.shared.list.filter { $0.provider == p }) { a in
+                            if let qa = o.quotas[Profile(p, account: a.id).quotaKey] {
+                                Text("\(a.label): " + qa.windows.map { "\($0.name) \(Int($0.usedPercent.rounded()))%" }.joined(separator: " · "))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     } else {
                         switch o.quotaStatus(for: p) {
                         case .reading:

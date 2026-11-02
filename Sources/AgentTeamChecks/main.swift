@@ -1199,7 +1199,57 @@ do {
     check(ChatSearch.find("t", in: [a, b]).isEmpty, "one-letter query returns nothing")
 }
 
+// A limited default account hands the work to the same provider's next account before any fallback.
+@MainActor func accountRotationScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-acct-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    AccountStore.root = dir.appendingPathComponent("store")
+    AccountStore.keyLookup = { $0 == "api1" ? "sk-test" : nil }
+    let second = Account(id: "acct2", provider: .claude, label: "Claude 2", kind: .login)
+    let muse = Account(id: "api1", provider: .claude, label: "Muse", kind: .apiKey, baseURL: "https://api.meta.ai", dailyTokenCap: 100)
+    AccountStore.accounts = [second, muse]
+    var used: [String?] = []
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        used.append(req.profile.account)
+        if req.profile.account == nil { return "exit 1: You've hit your 5-hour limit · resets 11pm (Asia/Saigon)" }
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    let t = o.team.agents.first { $0.roleId == "testing" }!
+    o.team.agents[o.team.agents.firstIndex { $0.id == t.id }!].profile = Profile(.claude, "sonnet")
+    let c = o.newChat(agentId: t.id, title: "t")
+    o.send("viết test", to: c)
+    for _ in 0..<300 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(used == [nil, "acct2"] && o.chat(c)?.status == .done, "limited default account rotates to the second account of the same provider (\(used))")
+    check(!AccountStore.rotation(.claude).contains(muse), "an account on another service (base URL) never joins the rotation")
+
+    let env = AccountStore.environment("api1")
+    check(env["ANTHROPIC_API_KEY"] == "sk-test" && env["ANTHROPIC_BASE_URL"] == "https://api.meta.ai" && env["CLAUDE_CONFIG_DIR"] != nil,
+          "API account runs Claude Code with its key, base URL and own config dir")
+    check(AccountStore.environment(nil).isEmpty && AccountStore.environment("acct2")["CLAUDE_CONFIG_DIR"] != nil, "default account keeps the CLI's own login")
+    check(!AccountStore.addUsage("api1", tokens: 60) && AccountStore.addUsage("api1", tokens: 50), "daily token cap trips once reached")
+
+    let home = dir.appendingPathComponent("home")
+    try FileManager.default.createDirectory(at: home.appendingPathComponent(".gemini/antigravity-cli"), withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: home.appendingPathComponent(".gemini/config"), withIntermediateDirectories: true)
+    try "x".write(to: home.appendingPathComponent(".gitconfig"), atomically: true, encoding: .utf8)
+    try "t".write(to: home.appendingPathComponent(".gemini/antigravity-cli/antigravity-oauth-token"), atomically: true, encoding: .utf8)
+    try "{}".write(to: home.appendingPathComponent(".gemini/antigravity-cli/settings.json"), atomically: true, encoding: .utf8)
+    let ah = AccountStore.agyHome(dir.appendingPathComponent("agyacct"), realHome: home)
+    let fm = FileManager.default
+    check(fm.fileExists(atPath: ah.appendingPathComponent(".gitconfig").path)
+          && fm.fileExists(atPath: ah.appendingPathComponent(".gemini/antigravity-cli/settings.json").path)
+          && fm.fileExists(atPath: ah.appendingPathComponent(".gemini/config").path)
+          && !fm.fileExists(atPath: ah.appendingPathComponent(".gemini/antigravity-cli/antigravity-oauth-token").path),
+          "agy account home shares the real home and settings but not the sign-in")
+    AccountStore.accounts = []
+    o.stop(c)
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await accountRotationScenario()
 try await eventBurstScenario()
 try await stuckAgySessionScenario()
 try await agyQuotaScenario()
