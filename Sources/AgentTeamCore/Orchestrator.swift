@@ -431,6 +431,13 @@ public final class Orchestrator {
               Không bảo người dùng gõ "Tiếp tục" hay đổi model; cứ kết thúc lượt, kết quả sẽ tự tới.
             - Chỉ viết "sẽ giao" KHÔNG tạo nhiệm vụ; phải chạy lệnh. Mỗi lượt tối đa \(team.maxDispatchPerTurn) lần giao.
             - Nội dung giao phải tự đủ: phạm vi, đầu ra, bằng chứng cần báo cáo (agent nhận không thấy cuộc trò chuyện này).
+            - Tuần tự hay song song: việc cần kết quả của bước trước ("sau đó", "dựa trên kết quả", các bước đánh số) thì giao
+              từng bước một và chờ kết quả rồi mới giao bước sau. Chỉ giao cùng lúc nhiều agent khi các việc độc lập với nhau.
+            - Truyền kết quả: agent sau không thấy kết quả của agent trước. Khi giao bước sau, trích phần cần dùng
+              (kết luận, số liệu, đường dẫn file, file:line) vào nội dung giao.
+            - Dừng chuỗi khi một bước lỗi/bị chặn/KHÔNG ĐẠT: không giao bước kế tiếp. Giao lại đúng vai trò đó sửa bằng `--tab <chatId>`;
+              chỉ dừng hẳn và báo người dùng khi cần họ quyết định (nêu rõ chuyện gì xảy ra và lựa chọn).
+            - Tự điều phối tới khi xong: chỉ trả lời người dùng khi đã có kết quả hoàn chỉnh cho yêu cầu, hoặc bị chặn thật sự cần họ quyết định.
             - ACK `queued/started` chỉ là đã xếp hàng. Giao xong thì kết thúc lượt; kết quả tự gửi về chat này.
             - Xem đầy đủ một kết quả bị cắt: `agentteam show <chatId>`.
             - Tự rà soát, không cần bạn chuyển tay (tiết kiệm lượt của bạn):

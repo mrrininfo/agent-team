@@ -462,6 +462,7 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     o.send("Sửa nút Lưu", to: leadChat)
     await settle()
     check(prompts.first?.1.contains("HỢP ĐỒNG VAI TRÒ") == true && prompts.first?.1.contains("agentteam dispatch") == true, "lead gets preamble with dispatch help")
+    check(prompts.first?.1.contains("Truyền kết quả") == true && prompts.first?.1.contains("Dừng chuỗi") == true, "lead gets sequencing, forwarding and stop-on-failure rules")
 
     // R3: Dispatch with atomic receipt and replay testing
     let reqId = "req-test-\(shortId())"
