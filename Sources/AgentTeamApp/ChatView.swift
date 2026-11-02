@@ -15,6 +15,7 @@ struct ChatView: View {
     @State private var attachError = ""
     @State private var dropTargeted = false
     @State private var shown = ChatView.page
+    @FocusState private var composerFocused: Bool
     static let page = 30
     @State private var pasteMonitor: Any?
 
@@ -235,6 +236,7 @@ struct ChatView: View {
                 .buttonStyle(.borderless)
                 .help("Đính kèm file/ảnh (hoặc kéo thả, hoặc ⌘V ảnh/file đã copy)")
             TextEditor(text: $draft)
+                .focused($composerFocused)
                 .font(.body)
                 .frame(minHeight: 44, maxHeight: 120)
                 .scrollContentBackground(.hidden)
@@ -248,9 +250,18 @@ struct ChatView: View {
                     sendDraft()
                     return .handled
                 }
-            Button { sendDraft() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
-            .buttonStyle(.borderless)
-            .help("Gửi (↩) · xuống hàng: ⇧↩")
+            VStack(spacing: 8) {
+                // macOS Dictation (supports Vietnamese, no extra permission prompts in the app): focus the box, then start it.
+                Button {
+                    composerFocused = true
+                    DispatchQueue.main.async { NSApp.sendAction(Selector(("startDictation:")), to: nil, from: nil) }
+                } label: { Image(systemName: "mic.circle").font(.title) }
+                .buttonStyle(.borderless)
+                .help("Nói thay vì gõ (Đọc chính tả của macOS; bấm lại nút này hoặc Esc để dừng). Đổi ngôn ngữ: Cài đặt hệ thống → Bàn phím → Đọc chính tả")
+                Button { sendDraft() } label: { Image(systemName: "arrow.up.circle.fill").font(.title) }
+                .buttonStyle(.borderless)
+                .help("Gửi (↩) · xuống hàng: ⇧↩")
+            }
             }
         }
         .padding(12)
