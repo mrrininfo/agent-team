@@ -1157,7 +1157,38 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     try? FileManager.default.removeItem(at: dir)
 }
 
+@MainActor func eventBurstScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-burst-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    final class Box: @unchecked Sendable { var o: Orchestrator?; var changes = 0; var armed = false }
+    let box = Box()
+    let o = try Orchestrator(workspace: dir) { chatId, _, _, emit in
+        for i in 0..<200 {
+            // One live observer at a time, so each counted change is a real redraw of the chat.
+            if !box.armed {
+                box.armed = true
+                withObservationTracking { _ = box.o?.chat(chatId) } onChange: { box.changes += 1; box.armed = false }
+            }
+            emit(.progress("l\(i)"))
+            emit(.usage(1))
+        }
+        emit(.final("ok"))
+        return nil
+    }
+    box.o = o
+    o.gitStatus = { _ in nil }
+    let worker = o.team.agents.first { $0.roleId == "worker" }!
+    let c = o.newChat(agentId: worker.id, title: "w")
+    o.send("go", to: c)
+    for _ in 0..<300 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    let chat = o.chat(c)
+    check(box.changes <= 5, "a burst of 400 events redraws the chat a few times, not per event (\(box.changes))")
+    check(chat?.tokens == 200 && chat?.trail.contains("l199") == true, "burst still keeps every token and the last progress line")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await eventBurstScenario()
 try await stuckAgySessionScenario()
 try await agyQuotaScenario()
 try await concurrentPipesScenario()

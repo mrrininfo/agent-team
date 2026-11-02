@@ -547,6 +547,29 @@ public final class Orchestrator {
         lastSignal[chatId] = Date()
         let started = Date()
         var firstSignal: TimeInterval?
+        // Progress and token events arrive in bursts; applying each one re-saved the whole chat and redrew the
+        // window per event, freezing the UI for a minute. Buffer them and apply at most once a second.
+        var lines: [String] = [], tokens = 0, lastFlush = Date.distantPast, flushScheduled = false
+        func flush() {
+            guard !lines.isEmpty || tokens > 0 else { return }
+            let l = lines, n = tokens
+            lines = []; tokens = 0; lastFlush = Date()
+            update(chatId) {
+                if let last = l.last { $0.activity = last }
+                $0.trail = Array(($0.trail + l).suffix(30))
+                $0.tokens += n
+            }
+        }
+        func buffered() {
+            if Date().timeIntervalSince(lastFlush) >= 1 { flush(); return }
+            guard !flushScheduled else { return }
+            flushScheduled = true
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                flushScheduled = false
+                flush()
+            }
+        }
         let exitError = await runner(chatId, req, paths.workspace) { [weak self] e in
             self?.lastSignal[chatId] = Date()
             if firstSignal == nil { firstSignal = Date().timeIntervalSince(started) }
@@ -559,9 +582,11 @@ public final class Orchestrator {
                     $0.sessionCanDispatch = role.canDispatch
                 }
             case .progress(let t):
-                let line = String(t.replacingOccurrences(of: "\n", with: " ").prefix(200))
-                self?.update(chatId) { $0.activity = line; $0.trail = Array(($0.trail + [line]).suffix(30)) }
-            case .usage(let n): self?.update(chatId) { $0.tokens += max(0, n) }
+                lines.append(String(t.replacingOccurrences(of: "\n", with: " ").prefix(200)))
+                buffered()
+            case .usage(let n):
+                tokens += max(0, n)
+                buffered()
             case .quota(let w):
                 self?.quotas[profile.provider.rawValue] = ProviderQuota(windows: w, updated: Date())
                 if let q = self?.quotas { Quota.save(q) }
@@ -576,6 +601,7 @@ public final class Orchestrator {
             case .failure(let t): failure = t
             }
         }
+        flush()
         let timing = TurnTiming(firstSignal: firstSignal, total: Date().timeIntervalSince(started), provider: profile.label)
         update(chatId) { $0.lastTiming = timing }
         logTiming(chatId, role: role.name, timing, ok: final != nil)
