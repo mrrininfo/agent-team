@@ -763,8 +763,9 @@ public final class Orchestrator {
             startGoalCheck(chatId, answer: final)
             scheduleCompact(chatId, profile: profile)
             if team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.access == .write { refreshGraph() }
-        } else if let error, isLimitError(error) {
-            let until = limitReset(profile, error: error)
+        } else if let error, isLimitError(error) || isSignedOutError(error) {
+            let signedOut = isSignedOutError(error)
+            let until = signedOut ? nil : limitReset(profile, error: error)
             let who: String
             if profile.provider == .antigravity {
                 // Per-model quota: park only this model; the role's other Antigravity models stay usable.
@@ -790,7 +791,7 @@ public final class Orchestrator {
                 $0.status = canContinue ? .queued : .limited
                 $0.reportedModel = nil
                 $0.reportedModelProvider = nil
-                $0.messages.append(Message(.system, "\(who) bị limit: \(clip(error, 300))\n"
+                $0.messages.append(Message(.system, (signedOut ? "\(who) chưa đăng nhập hoặc tài khoản chưa dùng được (bấm Login ở Team & Provider): " : "\(who) bị limit: ") + "\(clip(error, 300))\n"
                     + (canContinue ? "Tự động chuyển sang provider dự phòng kèm gói bàn giao. " : "Hết fallback; việc được giữ và tự chạy lại. ") + wait))
             }
         } else if let error, isModelError(error) {

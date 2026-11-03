@@ -37,6 +37,11 @@ struct TeamView: View {
         }
         .formStyle(.grouped)
         .task { await accounts.refresh(o.team.binaryPaths) }
+        // Signing in lifts a "not signed in" park at once instead of after the cooldown.
+        // Only a signed-out → signed-in change: a quota limit on a signed-in provider must stay until its reset.
+        .onChange(of: accounts.status.compactMapValues(\.ok)) { old, new in
+            for (p, ok) in new where ok && old[p] == false && o.team.limitedProviders.contains(p) { o.clearLimit(p) }
+        }
         .sheet(item: $addingKey) { p in AddKeySheet(provider: p) { accounts.add($0, key: $1) } }
         .confirmationDialog("Chuyển sang bộ \(pendingSetup?.title ?? "")?", isPresented: Binding(
             get: { pendingSetup != nil }, set: { if !$0 { pendingSetup = nil } })) {

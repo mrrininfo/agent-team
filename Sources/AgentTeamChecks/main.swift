@@ -1658,7 +1658,37 @@ do {
     AccountStore.accounts = []
 }
 
+// A provider that is not signed in hands the work to the role's fallback instead of failing the chat.
+@MainActor func signedOutScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-signout-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var used: [Provider] = []
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        used.append(req.profile.provider)
+        if req.profile.provider == .muse {
+            return "exit 1: missing meta credentials: run `muse login` or set META_API_KEY, or save credentials at /Users/x/.config/muse/auth.json"
+        }
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    let li = o.team.agents.firstIndex { $0.roleId == "lead" }!
+    o.team.agents[li].profile = Profile(.muse, "muse-spark-1.3")
+    let ri = o.team.roles.firstIndex { $0.id == "lead" }!
+    o.team.roles[ri].fallbacks = [Profile(.claude, "opus")]
+    let c = o.newChat(agentId: o.team.agents[li].id, title: "l")
+    o.send("Alo", to: c)
+    for _ in 0..<400 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(used == [.muse, .claude] && o.chat(c)?.status == .done && o.team.limitedProviders.contains(.muse),
+          "signed-out provider fails over to the fallback (\(used))")
+    check(o.chat(c)?.messages.contains { $0.text.contains("chưa đăng nhập") } == true, "the chat says the provider is signed out")
+    check(isSignedOutError("Muse Code requires a payment method — subscribe at https://accountscenter.meta.com/x, then log in again.")
+          && !isSignedOutError("tests failed"), "sign-out messages are recognised")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await signedOutScenario()
 try await minorFixesScenario()
 try await reviewFixesScenario()
 try await goalCheckScenario()

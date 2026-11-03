@@ -295,6 +295,13 @@ public func isNetworkError(_ text: String) -> Bool {
 }
 
 /// agy's wording when it cannot refresh its sign-in, usually because the network dropped; retried after a login check.
+/// The CLI is not signed in (or the account cannot be used yet): treated like a limit, so the role's fallback takes over
+/// and the provider is retried after the cooldown, once the user has logged in.
+public func isSignedOutError(_ text: String) -> Bool {
+    let t = text.lowercased()
+    return ["missing meta credentials", "not logged in", "requires a payment method", "please run /login"].contains { t.contains($0) }
+}
+
 public func isAuthTimeout(_ text: String) -> Bool { text.lowercased().contains("authentication failed or timed out") }
 
 /// When a limit message says the limit resets, e.g. Claude's "resets 12:50am (Asia/Saigon)" or "resets Nov 2, 9am".
