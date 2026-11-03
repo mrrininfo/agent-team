@@ -6,12 +6,16 @@ public enum Brief {
     static let requests = "## Yêu cầu của người dùng (nguyên văn)"
     static let criteria = "## Tiêu chí xong"
     static let outOfScope = "## Ngoài phạm vi"
+    /// Requests are fenced by HTML comments, not headings: pasted markdown (### A, ## Tiêu chí xong…) stays inside its request.
+    static let entryMark = "<!-- yêu cầu "
+    static let endMark = "<!-- hết yêu cầu -->"
 
     public static func record(_ text: String, at date: Date, file: URL) {
         var s = (try? String(contentsOf: file, encoding: .utf8))
-            ?? "\(requests)\n\n\(criteria)\n(Lead viết: mỗi tiêu chí một dòng, kiểm chứng được)\n\n\(outOfScope)\n(Lead viết)\n"
-        let entry = "### \(date.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false)))\n\(text)\n\n"
-        if let r = s.range(of: criteria) { s.insert(contentsOf: entry, at: r.lowerBound) } else { s += entry }
+            ?? "\(requests)\n\(endMark)\n\n\(criteria)\n(Lead viết: mỗi tiêu chí một dòng, kiểm chứng được)\n\n\(outOfScope)\n(Lead viết)\n"
+        let safe = text.replacingOccurrences(of: "<!--", with: "< !--")
+        let entry = "\(entryMark)\(date.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))) -->\n\(safe)\n"
+        if let r = s.range(of: endMark) { s.insert(contentsOf: entry, at: r.lowerBound) } else { s += entry }
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? s.write(to: file, atomically: true, encoding: .utf8)
     }
@@ -19,8 +23,9 @@ public enum Brief {
     /// What goes on top of every Lead turn: the first request, the latest three, and the Lead's criteria, within `limit`.
     public static func block(_ file: URL, limit: Int = 3000) -> String? {
         guard let s = try? String(contentsOf: file, encoding: .utf8) else { return nil }
-        let split = s.range(of: criteria).map { (String(s[..<$0.lowerBound]), String(s[$0.lowerBound...])) } ?? (s, "")
-        let entries = split.0.components(separatedBy: "\n### ").dropFirst()
+        let split = s.range(of: endMark).map { (String(s[..<$0.lowerBound]), String(s[$0.upperBound...])) } ?? (s, "")
+        let entries = split.0.components(separatedBy: entryMark).dropFirst()
+            .map { e in e.range(of: "-->").map { String(e[$0.upperBound...]) } ?? e }
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard let first = entries.first else { return nil }
         let latest = Array(entries.dropFirst().suffix(3))
@@ -31,7 +36,7 @@ public enum Brief {
         let firstPart = clip(first, latest.isEmpty ? budget : budget / 3)
         let each = latest.isEmpty ? 0 : (budget - firstPart.count) / latest.count
         var out = head + "## Yêu cầu đầu tiên\n" + firstPart + "\n"
-        if !latest.isEmpty { out += "## Yêu cầu gần nhất\n" + latest.map { clip($0, max(80, each)) }.joined(separator: "\n") + "\n" }
+        if !latest.isEmpty { out += "## Yêu cầu gần nhất\n" + latest.map { clip($0, max(80, each)) }.joined(separator: "\n---\n") + "\n" }
         out += rest + "\n\n"
         return out.count <= limit ? out : String(out.prefix(limit))
     }

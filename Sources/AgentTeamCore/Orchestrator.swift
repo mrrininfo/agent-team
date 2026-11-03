@@ -53,7 +53,7 @@ public final class Orchestrator {
     @ObservationIgnored public var cancelTurn: (String) -> Void = { _ in }
     @ObservationIgnored public var gitStatus: (URL) -> String? = Orchestrator.defaultGitStatus
     /// `git diff --stat HEAD`, compared between verification rounds to notice a loop that changes nothing.
-    @ObservationIgnored public var gitDiff: (URL) -> String? = { Orchestrator.git($0, ["diff", "--stat", "HEAD"]) }
+    @ObservationIgnored public var gitDiff: (URL) -> String? = Orchestrator.defaultGitDiff
     @ObservationIgnored var dispatchCount: [String: Int] = [:]
     @ObservationIgnored var stopping: Set<String> = []
     @ObservationIgnored var timer: Timer?
@@ -285,8 +285,10 @@ public final class Orchestrator {
 
     public func send(_ text: String, to chatId: String) {
         if let c = chat(chatId), team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.canDispatch == true {
+            let fresh = !FileManager.default.fileExists(atPath: paths.briefFile(chatId).path)
             Brief.record(text, at: Date(), file: paths.briefFile(chatId))
-            update(chatId) { $0.goalChecked = nil }
+            // A new brief (also after `agentteam brief done`) starts with nothing dispatched under it.
+            update(chatId) { $0.goalChecked = nil; if fresh { $0.briefDispatched = nil } }
         }
         update(chatId) {
             $0.autoTurns = 0
@@ -303,12 +305,25 @@ public final class Orchestrator {
         update(chatId) { $0.briefDispatched = nil; $0.goalChecked = nil }
     }
 
+    /// Work started by this chat, directly or down a relay (reviewer, fixer), that is still running, queued or mid-relay.
+    func busyDescendants(_ id: String) -> Bool {
+        var frontier = [id], seen: Set<String> = [id]
+        while let p = frontier.popLast() {
+            for c in chats where c.replyTo == p && c.goalCheckFor == nil && !seen.contains(c.id) {
+                if [.running, .queued].contains(c.status) || c.relay != nil { return true }
+                seen.insert(c.id)
+                frontier.append(c.id)
+            }
+        }
+        return false
+    }
+
     /// Once the Lead answers a brief it dispatched work for and nothing it started is still running, the Critic checks
     /// the answer against the brief, once. Skipped when off, without a usable Critic, or without a brief.
     func startGoalCheck(_ leadId: String, answer: String) {
         guard team.goalCheckOn, let c = chat(leadId), c.briefDispatched == true, c.goalChecked != true, c.pending.isEmpty,
               team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.canDispatch == true,
-              !chats.contains(where: { $0.replyTo == leadId && [.running, .queued].contains($0.status) }),
+              !busyDescendants(leadId),
               let critic = team.agents.first(where: { $0.roleId == "critic" }), team.effectiveProfile(for: critic) != nil,
               let brief = Brief.block(paths.briefFile(leadId)) else { return }
         update(leadId) { $0.goalChecked = true }
@@ -1407,6 +1422,24 @@ public final class Orchestrator {
     }
 
     nonisolated public static func defaultGitStatus(_ dir: URL) -> String? { git(dir, ["status", "--porcelain"]) }
+
+    nonisolated public static func gitForChecks(_ dir: URL, _ args: [String]) -> String? { git(dir, args) }
+
+    /// Hash of the full working-tree change: `git diff HEAD` plus untracked files (new tests, new modules), which
+    /// `--stat` would miss, so a round that only edits a new file still counts as progress.
+    nonisolated public static func defaultGitDiff(_ dir: URL) -> String? {
+        guard let diff = git(dir, ["diff", "HEAD"]) else { return nil }
+        var h = SHA256()
+        h.update(data: Data(diff.utf8))
+        for f in (git(dir, ["ls-files", "--others", "--exclude-standard", "-z"]) ?? "").split(separator: "\0") {
+            let url = dir.appendingPathComponent(String(f))
+            h.update(data: Data(f.utf8))
+            // shortcut: files over 5 MB count by size only, so a large data file does not stall the main thread; hash them if that misleads.
+            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            if size <= 5_000_000, let d = try? Data(contentsOf: url) { h.update(data: d) } else { h.update(data: Data("\(size)".utf8)) }
+        }
+        return h.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 
     nonisolated static func git(_ dir: URL, _ args: [String]) -> String? {
         let p = Process()

@@ -1485,7 +1485,87 @@ do {
           && PipelineStage.of(chat("research", .running), team: team) == nil, "finished and off-pipeline chats have no stage; goal checks are last")
 }
 
+// Review fixes: progress detection sees untracked edits; goal check waits for whole relay chains; a closed brief resets dispatch state;
+// pasted markdown does not break the brief.
+@MainActor func reviewFixesScenario() async throws {
+    let repo = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-diff-\(shortId())")
+    try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+    for args in [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]] { _ = Orchestrator.gitForChecks(repo, args) }
+    try "a\n".write(to: repo.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
+    _ = Orchestrator.gitForChecks(repo, ["add", "."]); _ = Orchestrator.gitForChecks(repo, ["commit", "-qm", "i"])
+    try "test A\n".write(to: repo.appendingPathComponent("t.py"), atomically: true, encoding: .utf8)
+    let d1 = Orchestrator.defaultGitDiff(repo)
+    try "test B\n".write(to: repo.appendingPathComponent("t.py"), atomically: true, encoding: .utf8)
+    let d2 = Orchestrator.defaultGitDiff(repo)
+    try "x\n".write(to: repo.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
+    let d3 = Orchestrator.defaultGitDiff(repo)
+    try "y\n".write(to: repo.appendingPathComponent("a.swift"), atomically: true, encoding: .utf8)
+    let d4 = Orchestrator.defaultGitDiff(repo)
+    check(d1 != nil && d1 != d2 && d3 != d4, "progress check sees edits to untracked files and repeated edits of one line")
+    try? FileManager.default.removeItem(at: repo)
+
+    let big = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-bf-\(shortId()).md")
+    Brief.record("đầu tiên", at: Date(), file: big)
+    Brief.record("Làm theo spec này:\n### A\nx\n### B\ny\n## Tiêu chí xong\nz", at: Date(), file: big)
+    Brief.record("tin cuối", at: Date(), file: big)
+    let b = Brief.block(big) ?? ""
+    check(b.contains("Làm theo spec này:") && b.contains("### B") && b.contains("tin cuối") && b.contains("đầu tiên"),
+          "pasted markdown headings stay inside their request")
+    try? FileManager.default.removeItem(at: big)
+
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-gc2-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    final class Box { var o: Orchestrator?; var lead = "" }
+    let box = Box()
+    var leadTurns = 0, checked: [String] = []
+    let o = try Orchestrator(workspace: dir) { chatId, req, _, emit in
+        guard let o = box.o, let role = o.chat(chatId).flatMap({ o.team.agent($0.agentId) })?.roleId else { return nil }
+        switch role {
+        case "lead":
+            leadTurns += 1
+            if req.prompt.contains("DISPATCH") && leadTurns == 1 {
+                _ = o.handle(DispatchRequest(from: box.lead, to: "planner", title: "p", tab: nil, body: "phân tích"))
+                _ = o.handle(DispatchRequest(from: box.lead, to: "worker", title: "w", tab: nil, body: "làm", reviewer: "testing", mode: .verify))
+            }
+            emit(.final("Câu hỏi: X? Đáp án \(leadTurns)"))
+        case "critic":
+            checked.append(req.prompt.components(separatedBy: "Đáp án ").last.map { String($0.prefix(1)) } ?? "?")
+            emit(.final("KẾT LUẬN: ĐẠT"))
+        case "testing":
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            emit(.final("KẾT LUẬN: ĐẠT"))
+        default:
+            emit(.final("xong \(role)"))
+        }
+        return nil
+    }
+    box.o = o
+    o.gitStatus = { _ in nil }
+    o.applySetup(TeamPreset.standard.setup)
+    for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
+    o.team.roles = o.team.roles.map { var r = $0; r.fallbacks = []; return r }
+    o.team.maxConcurrent = 5
+    box.lead = o.newChat(agentId: o.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
+    func settle() async {
+        for _ in 0..<1000 {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+            if !o.chats.contains(where: { [.running, .queued].contains($0.status) }) { break }
+        }
+    }
+    o.send("Câu hỏi X? DISPATCH", to: box.lead)
+    await settle()
+    check(checked == [String(leadTurns)], "goal check waits for the verify chain and checks only the final answer (\(checked), lead turns \(leadTurns))")
+
+    Brief.close(o.paths.briefFile(box.lead), doneDir: o.paths.briefsDone)  // as `agentteam brief done` does
+    checked = []
+    o.send("Câu hỏi nhanh", to: box.lead)
+    await settle()
+    check(checked.isEmpty, "after the Lead closes its brief, a quick answer without dispatch is not checked")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await reviewFixesScenario()
 try await goalCheckScenario()
 try await failureRoutingScenario()
 try await taskCardScenario()
