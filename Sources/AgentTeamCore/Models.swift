@@ -150,6 +150,11 @@ public struct DispatchReceipt: Codable, Hashable, Sendable {
 /// Automatic loop between a doer chat and a reviewer, run by the app instead of the dispatcher:
 /// debate (Planner ↔ Critic until "KHÔNG CÒN PHẢN BÁC LỚN") or verify (Worker → Testing until "KẾT LUẬN: ĐẠT").
 /// Only the final outcome goes back to the dispatcher, which saves its turns.
+/// Where a failed verification goes back to.
+public enum FailureClass: String, CaseIterable, Sendable {
+    case specGap = "SPEC_GAP", executionDefect = "EXECUTION_DEFECT", verifyDefect = "VERIFY_DEFECT", evidenceMissing = "EVIDENCE_MISSING"
+}
+
 public struct Relay: Codable, Hashable, Sendable {
     public enum Mode: String, Codable, Sendable { case debate, verify }
     public var mode: Mode
@@ -160,6 +165,11 @@ public struct Relay: Codable, Hashable, Sendable {
     public var maxRounds: Int
     /// The original assignment, given to the reviewer with the first result.
     public var task: String
+    /// Architect chat fixing the task card after a SPEC_GAP verdict.
+    public var fixerChat: String?
+    /// Failing criteria and `git diff --stat` of the previous round: equal again means the loop is not progressing.
+    public var lastFailure: String?
+    public var lastDiff: String?
 
     public init(mode: Mode, reviewerAgent: String, maxRounds: Int, task: String) {
         self.mode = mode
@@ -169,6 +179,21 @@ public struct Relay: Codable, Hashable, Sendable {
     }
 
     public static let agreed = "KHÔNG CÒN PHẢN BÁC LỚN"
+
+    /// The Verifier's last `PHÂN LOẠI:` line, read loosely (case, spacing) so a sloppy line still routes.
+    public static func classify(_ text: String) -> FailureClass? {
+        guard let line = text.components(separatedBy: .newlines).last(where: { $0.uppercased().contains("PHÂN LOẠI:") }),
+              let r = line.uppercased().range(of: "PHÂN LOẠI:") else { return nil }
+        let v = line.uppercased()[r.upperBound...].filter { !$0.isWhitespace && $0 != "`" && $0 != "*" }
+        return FailureClass.allCases.first { v.hasPrefix($0.rawValue) }
+    }
+
+    /// Failing criteria lines (not the verdict line), to tell a repeated failure from progress.
+    public static func failures(_ text: String) -> String {
+        text.components(separatedBy: .newlines)
+            .filter { $0.uppercased().contains("KHÔNG ĐẠT") && !$0.uppercased().contains("KẾT LUẬN") }
+            .map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
+    }
 
     /// Verify mode: the last "KẾT LUẬN:" line decides; without one, any "KHÔNG ĐẠT" fails.
     public static func passed(_ text: String, mode: Mode) -> Bool {

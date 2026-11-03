@@ -1360,7 +1360,57 @@ do {
     try? FileManager.default.removeItem(at: dir)
 }
 
+// Runs one Executor task under --verify with scripted Verifier verdicts; returns the roles in turn order and the Lead's callback.
+@MainActor func runVerify(_ verdicts: [String], diffs: [String] = []) async throws -> (roles: [String], report: String) {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-route-\(shortId())")
+    try FileManager.default.createDirectory(at: dir.appendingPathComponent(".agentteam/tasks"), withIntermediateDirectories: true)
+    let card = "## Mục tiêu\nx\n## File được sửa\na\n## Khung code\nf\n## Test nghiệm thu\nt\n## Ngoài phạm vi\nn"
+    try card.write(to: dir.appendingPathComponent(".agentteam/tasks/ok.md"), atomically: true, encoding: .utf8)
+    final class Box { var o: Orchestrator? }
+    let box = Box()
+    var roles: [String] = [], v = verdicts, d = diffs
+    let o = try Orchestrator(workspace: dir) { chatId, _, _, emit in
+        let role = box.o?.chat(chatId).flatMap { box.o?.team.agent($0.agentId) }?.roleId ?? "?"
+        roles.append(role)
+        emit(.final(role == "testing" ? (v.isEmpty ? "KẾT LUẬN: ĐẠT" : v.removeFirst()) : "xong \(role)"))
+        return nil
+    }
+    box.o = o
+    o.gitStatus = { _ in nil }
+    o.gitDiff = { _ in d.isEmpty ? shortId() : d.removeFirst() }
+    o.applySetup(TeamPreset.lite34.setup)
+    for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
+    o.team.roles = o.team.roles.map { var r = $0; r.fallbacks = []; return r }
+    let lead = o.newChat(agentId: o.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
+    _ = o.handle(DispatchRequest(from: lead, to: "worker", title: "w", tab: nil, body: "làm", reviewer: "testing", mode: .verify, rounds: 5,
+                                 card: ".agentteam/tasks/ok.md"))
+    for _ in 0..<800 where o.chats.contains(where: { [.running, .queued].contains($0.status) }) || !(o.chat(lead)?.messages.contains { $0.kind == .callback } ?? false) {
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+    let report = o.chat(lead)?.messages.last { $0.kind == .callback }?.text ?? ""
+    try? FileManager.default.removeItem(at: dir)
+    return (roles, report)
+}
+
+@MainActor func failureRoutingScenario() async throws {
+    let spec = try await runVerify(["Tiêu chí 1: KHÔNG ĐẠT\nPHÂN LOẠI: SPEC_GAP\nKẾT LUẬN: KHÔNG ĐẠT"])
+    check(Array(spec.roles.prefix(5)) == ["worker", "testing", "planner", "worker", "testing"] && spec.report.contains("ĐẠT sau 2 vòng"),
+          "SPEC_GAP goes to the Architect, then back to the Executor (\(spec.roles))")
+    let test = try await runVerify(["Tiêu chí 1: KHÔNG ĐẠT\nphân loại:  verify_defect \nKẾT LUẬN: KHÔNG ĐẠT"])
+    check(Array(test.roles.prefix(3)) == ["worker", "testing", "testing"], "VERIFY_DEFECT (any case/spacing) goes back to the Verifier (\(test.roles))")
+    let plain = try await runVerify(["Tiêu chí 1: KHÔNG ĐẠT\nKẾT LUẬN: KHÔNG ĐẠT"])
+    check(Array(plain.roles.prefix(3)) == ["worker", "testing", "worker"], "no classification keeps the old route to the Executor")
+    let same = try await runVerify(Array(repeating: "Tiêu chí 1: KHÔNG ĐẠT\nKẾT LUẬN: KHÔNG ĐẠT", count: 5))
+    check(same.roles.filter { $0 == "testing" }.count == 2 && same.report.contains("không tiến triển"),
+          "the same failure twice stops the loop early (\(same.roles))")
+    let still = try await runVerify(["Tiêu chí 1: KHÔNG ĐẠT\nKẾT LUẬN: KHÔNG ĐẠT", "Tiêu chí 2: KHÔNG ĐẠT\nKẾT LUẬN: KHÔNG ĐẠT"], diffs: ["A", "A"])
+    check(still.roles.filter { $0 == "testing" }.count == 2 && still.report.contains("không tiến triển"), "an unchanged diff stops the loop early")
+    check(Relay.classify("PHÂN LOẠI: SPEC_GAP\nx\nPhân loại: EXECUTION_DEFECT") == .executionDefect && Relay.classify("không có") == nil,
+          "the last classification line wins")
+}
+
 try await scenario()
+try await failureRoutingScenario()
 try await taskCardScenario()
 try await briefScenario()
 try await accountRotationScenario()

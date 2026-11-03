@@ -52,6 +52,8 @@ public final class Orchestrator {
     @ObservationIgnored public var runner: TurnRunner
     @ObservationIgnored public var cancelTurn: (String) -> Void = { _ in }
     @ObservationIgnored public var gitStatus: (URL) -> String? = Orchestrator.defaultGitStatus
+    /// `git diff --stat HEAD`, compared between verification rounds to notice a loop that changes nothing.
+    @ObservationIgnored public var gitDiff: (URL) -> String? = { Orchestrator.git($0, ["diff", "--stat", "HEAD"]) }
     @ObservationIgnored var dispatchCount: [String: Int] = [:]
     @ObservationIgnored var stopping: Set<String> = []
     @ObservationIgnored var timer: Timer?
@@ -988,6 +990,11 @@ public final class Orchestrator {
     /// Moves a relay one step after a turn finished. Returns true when the result was routed by the relay
     /// (to the reviewer, back to the doer, or as the final outcome) instead of the normal callback.
     func relayStep(_ c: Chat, final: String) -> Bool {
+        // The Architect fixed the task card after a SPEC_GAP: the doer redoes the work, then verification continues.
+        if let dId = c.replyTo, let d = chat(dId), d.relay?.fixerChat == c.id {
+            enqueue(dId, "[Architect đã sửa thẻ việc/khung · chat \(c.id)]\n\(final)\n\nĐọc lại thẻ việc rồi làm lại theo bản mới và báo.", kind: .callback)
+            return true
+        }
         // The doer finished: its result goes to the reviewer.
         if var r = c.relay, let reviewer = team.agent(r.reviewerAgent) {
             let first = r.reviewerChat.flatMap(chat) == nil
@@ -996,7 +1003,8 @@ public final class Orchestrator {
                 : "[Nghiệm thu tự động · vòng \(r.round + 1)/\(r.maxRounds) · báo cáo của \(roleName(c.agentId)), chat \(c.id)]"
             let tailNote = r.mode == .debate
                 ? "Không còn vấn đề lớn thì ghi đúng câu \"\(Relay.agreed)\"."
-                : "Kết thúc bằng một dòng đúng mẫu: KẾT LUẬN: ĐẠT hoặc KẾT LUẬN: KHÔNG ĐẠT."
+                : "KHÔNG ĐẠT thì thêm một dòng PHÂN LOẠI: SPEC_GAP | EXECUTION_DEFECT | VERIFY_DEFECT | EVIDENCE_MISSING. "
+                    + "Kết thúc bằng một dòng đúng mẫu: KẾT LUẬN: ĐẠT hoặc KẾT LUẬN: KHÔNG ĐẠT."
             let text = head + "\n" + (first ? "Nhiệm vụ gốc:\n\(r.task)\n\n" : "")
                 + (r.mode == .debate ? "Đề xuất:\n" : "Báo cáo:\n") + final + "\n\n" + tailNote
             if first {
@@ -1018,6 +1026,36 @@ public final class Orchestrator {
             let doerFinal = chat(dId)?.messages.last(where: { $0.kind == .assistant })?.text ?? ""
             callback(from: d, status: status, text: doerFinal + "\n\n--- \(roleName(c.agentId)), vòng cuối ---\n" + clip(final, 1500))
             return true
+        }
+        if r.mode == .verify {
+            let failure = Relay.failures(final), diff = gitDiff(paths.workspace)
+            if (!failure.isEmpty && failure == r.lastFailure) || (diff != nil && diff == r.lastDiff) {
+                update(dId) { $0.relay = nil }
+                let doerFinal = chat(dId)?.messages.last(where: { $0.kind == .assistant })?.text ?? ""
+                callback(from: d, status: "không tiến triển sau \(r.round) vòng (lỗi lặp lại hoặc code không đổi)",
+                         text: doerFinal + "\n\n--- \(roleName(c.agentId)), vòng cuối ---\n" + clip(final, 1500))
+                return true
+            }
+            r.lastFailure = failure
+            r.lastDiff = diff
+            switch Relay.classify(final) {
+            case .specGap?:
+                if let architect = team.agents.first(where: { $0.roleId == "planner" }), architect.id != d.agentId {
+                    if r.fixerChat.flatMap(chat) == nil {
+                        r.fixerChat = newChat(agentId: architect.id, title: "Sửa thẻ việc: " + d.title, replyTo: dId)
+                    }
+                    update(dId) { $0.relay = r }
+                    enqueue(r.fixerChat!, "[SPEC_GAP từ \(roleName(c.agentId)) · vòng \(r.round)/\(r.maxRounds)]\n\(final)\n\n"
+                        + "Nhiệm vụ/thẻ việc hiện tại:\n\(r.task)\n\nSửa thẻ việc hoặc khung code cho đúng rồi báo ngắn đã đổi gì.", kind: .task)
+                    return true
+                }
+            case .verifyDefect?:
+                update(dId) { $0.relay = r }
+                enqueue(c.id, "[Sửa test · vòng \(r.round)/\(r.maxRounds)] Bạn phân loại lỗi là VERIFY_DEFECT: sửa test cho đúng tiêu chí, "
+                    + "chạy lại nghiệm thu với code hiện tại, rồi kết luận theo mẫu (PHÂN LOẠI nếu KHÔNG ĐẠT, rồi KẾT LUẬN).", kind: .task)
+                return true
+            default: break
+            }
         }
         update(dId) { $0.relay = r }
         let note = r.mode == .debate
@@ -1340,10 +1378,12 @@ public final class Orchestrator {
         return ack
     }
 
-    nonisolated public static func defaultGitStatus(_ dir: URL) -> String? {
+    nonisolated public static func defaultGitStatus(_ dir: URL) -> String? { git(dir, ["status", "--porcelain"]) }
+
+    nonisolated static func git(_ dir: URL, _ args: [String]) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["-C", dir.path, "status", "--porcelain"]
+        p.arguments = ["-C", dir.path] + args
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
