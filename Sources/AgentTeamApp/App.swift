@@ -247,6 +247,21 @@ final class AppModel {
         }
     }
 
+    /// Removes the project for good: its folder and the CLI sessions it ran go to the Trash. Other projects are untouched.
+    func removeProject() {
+        guard let o = orchestrator else { return }
+        let ws = o.paths.workspace, key = ws.standardizedFileURL.path
+        if let why = ProjectCleanup.refusal(workspace: ws) { error = why; return }
+        let residue = ProjectCleanup.residue(workspace: ws, sessionIds: Set(o.chats.compactMap(\.sessionId)), roots: ProjectCleanup.cliRoots())
+        close()
+        var failed: [String] = []
+        for u in residue + [ws] {
+            do { try FileManager.default.trashItem(at: u, resultingItemURL: nil) } catch { failed.append(u.path) }
+        }
+        removeFromRecent(key)
+        if !failed.isEmpty { error = "Không chuyển được vào Thùng rác: " + failed.prefix(3).joined(separator: ", ") }
+    }
+
     /// Leaves the current project: its running turns are paused and requeued, resumed when it is reopened.
     func close() {
         guard let o = orchestrator else { return }

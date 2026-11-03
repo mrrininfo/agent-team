@@ -389,6 +389,11 @@ do {
     let md = linkifyPaths("Xem `.agentteam/reports/bao cao.md` và README.md:12, không phải e.g. hay github.com, [đã có](README.md).", root: root)
     check(md.contains("[.agentteam/reports/bao cao.md](.agentteam/reports/bao%20cao.md)"), "backticked path with space becomes a link")
     check(md.contains("[README.md:12](README.md%3A12)") && !md.contains("[github.com]") && md.contains("[đã có](README.md)"), "bare existing path linked, others untouched")
+    // An agent's own link to an absolute path with spaces: no existing path inside it ("sub.dir") may be linked again.
+    try FileManager.default.createDirectory(at: root.appendingPathComponent("sub.dir"), withIntermediateDirectories: true)
+    let own = "[mở](<\(root.path)/sub.dir/Open me.command>) và [b](\(root.path)/sub.dir/x)"
+    check(linkifyPaths(own, root: root) == own, "existing markdown links left whole")
+    check(linkifyPaths("```sh\npython3 README.md\n```", root: root) == "```sh\npython3 README.md\n```", "code blocks left whole")
     check(resolveLocal(URL(string: "README.md:12")!, root: root)?.lastPathComponent == "README.md", "line suffix ignored when resolving")
     check(resolveLocal(URL(string: "https://example.com/a.md")!, root: root) == nil, "web links are not local files")
     check(Attachments.paths(in: "hi\n\n\(Attachments.marker)\n- a/b.png\n- c.pdf") == ["a/b.png", "c.pdf"], "attachment paths parsed")
@@ -1714,6 +1719,49 @@ try await firstTurnLimitScenario()
 try await resumeTupleScenario()
 try await installCheckScenario()
 try? FileManager.default.removeItem(at: ws)
+
+// Removing a project finds only its own CLI sessions, and refuses folders that would take other projects with them.
+do {
+    let fm = FileManager.default
+    let base = fm.temporaryDirectory.appendingPathComponent("cleanup-\(shortId())")
+    let ws = base.appendingPathComponent("Trading Clone"), sibling = base.appendingPathComponent("Trading Clone 2")
+    func put(_ u: URL, _ text: String = "x") {
+        try? fm.createDirectory(at: u.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? text.write(to: u, atomically: true, encoding: .utf8)
+    }
+    let claude = base.appendingPathComponent("claude"), codex = base.appendingPathComponent("codex"), agy = base.appendingPathComponent("agy")
+    let mine = claude.appendingPathComponent("projects/" + ProjectCleanup.claudeFolderName(ws.path))
+    put(mine.appendingPathComponent("a.jsonl"))
+    put(claude.appendingPathComponent("projects/" + ProjectCleanup.claudeFolderName(sibling.path) + "/b.jsonl"))
+    put(claude.appendingPathComponent("projects/-elsewhere/sid-1.jsonl"))
+    func meta(_ cwd: String) -> String { #"{"type":"session_meta","payload":{"cwd":"\#(cwd)"}}"# + "\n{}" }
+    let day = codex.appendingPathComponent("sessions/2026/10/30")
+    put(day.appendingPathComponent("rollout-a.jsonl"), meta(ws.path))
+    put(day.appendingPathComponent("rollout-b.jsonl"), meta(sibling.path))
+    put(day.appendingPathComponent("rollout-c.jsonl"), meta(ws.path + "/sub"))
+    put(day.appendingPathComponent("rollout-x-sid-2.jsonl"), meta("/tmp"))
+    func first(_ w: String) -> String { ##"{"content":"# AGENT TEAM\nBạn là Worker. Workspace: \##(w)\nQuyền: Đọc/ghi."}"## }
+    put(agy.appendingPathComponent("brain/c1/.system_generated/logs/transcript.jsonl"), first(ws.path))
+    put(agy.appendingPathComponent("conversations/c1.db"))
+    put(agy.appendingPathComponent("brain/c2/.system_generated/logs/transcript.jsonl"), first(sibling.path))
+    put(agy.appendingPathComponent("conversations/c2.db"))
+    put(agy.appendingPathComponent("brain/sid-3/x"))
+
+    let found = Set(ProjectCleanup.residue(workspace: ws, sessionIds: ["sid-1", "sid-2", "sid-3"], roots: [claude, codex, agy])
+        .map { $0.resolvingSymlinksInPath().path.replacingOccurrences(of: base.resolvingSymlinksInPath().path + "/", with: "") })
+    let expected: Set = ["claude/projects/" + ProjectCleanup.claudeFolderName(ws.path), "claude/projects/-elsewhere/sid-1.jsonl",
+                         "codex/sessions/2026/10/30/rollout-a.jsonl", "codex/sessions/2026/10/30/rollout-c.jsonl",
+                         "codex/sessions/2026/10/30/rollout-x-sid-2.jsonl", "agy/brain/c1", "agy/conversations/c1.db", "agy/brain/sid-3"]
+    check(found == expected, "residue is this project's sessions only, never the sibling 'Trading Clone 2' (\(found.symmetricDifference(expected)))")
+
+    put(ws.appendingPathComponent("src/main.swift"))
+    check(ProjectCleanup.refusal(workspace: ws, home: base.appendingPathComponent("home")) == nil, "a plain project can be removed")
+    check(ProjectCleanup.refusal(workspace: base, home: base.appendingPathComponent("home")) != nil, "a folder holding the home folder is refused")
+    put(ws.appendingPathComponent("inner/.agentteam/team.json"))
+    check(ProjectCleanup.refusal(workspace: ws, home: base.appendingPathComponent("home"))?.contains("inner") == true,
+          "a project holding another project is refused, naming it")
+    try? fm.removeItem(at: base)
+}
 
 print(failures == 0 ? "All checks passed" : "\(failures) check(s) failed")
 exit(failures == 0 ? 0 : 1)

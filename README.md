@@ -33,6 +33,8 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
    - Hết thời gian chờ (mặc định 30 phút), app tự gỡ đánh dấu limit và chạy tiếp các chat đang chờ,
      không cần ai bấm (học từ cơ chế auto-resume của agent-teams-ai).
 
+5. **Gỡ dự án** (nút thùng rác cạnh tên dự án): chuyển cả thư mục dự án và lịch sử phiên Claude Code/Codex/Antigravity của
+   riêng dự án đó vào Thùng rác, gỡ khỏi danh sách gần đây. Thư mục còn chứa dự án khác thì app từ chối.
 5. **Bộ mẫu team** (ngay trên danh sách vị trí): Mặc định, Design (tạo ảnh), Assistant (hỏi đáp kiểu chatbot).
    Mặc định: Lead điều phối → Planner lập kế hoạch (việc nhiều phần, `.agentteam/plans/`) rồi viết thẻ việc + khung code → Testing viết test trước → Worker làm theo thẻ
    (bắt buộc `--card`) → Testing nghiệm thu và phân loại lỗi (app tự trả lỗi về đúng ghế) → Critic chấm đáp án cuối;

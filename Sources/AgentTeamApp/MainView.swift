@@ -13,6 +13,8 @@ struct MainView: View {
     @Bindable var o: Orchestrator
     @State private var selection: Selection? = .team
     @State private var confirmDelete = false
+    @State private var confirmRemove = false
+    @State private var removeRefusal: String?
     @State private var preview = PreviewState()
     @State private var nameDraft = ""
     @State private var collapsed: Set<String> = []
@@ -50,6 +52,11 @@ struct MainView: View {
                             .onChange(of: editingName) { if !editingName { saveName() } }
                             .onAppear { nameDraft = displayName }
                             .help("Bấm để đổi tên hiển thị của dự án (thư mục trên ổ đĩa giữ nguyên)")
+                        Button {
+                            if let r = ProjectCleanup.refusal(workspace: o.paths.workspace) { removeRefusal = r } else { confirmRemove = true }
+                        } label: { Image(systemName: "trash") }
+                            .buttonStyle(.borderless).foregroundStyle(.secondary)
+                            .help("Gỡ dự án: chuyển thư mục dự án và lịch sử phiên Claude/Codex/agy của nó vào Thùng rác")
                     }
                     Text(o.paths.workspace.path).font(.caption2).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle)
                 }
@@ -151,6 +158,14 @@ struct MainView: View {
                 .environment(preview)
                 .inspectorColumnWidth(min: 280, ideal: 460, max: 1000)
         }
+        .confirmationDialog("Gỡ dự án \(displayName)?", isPresented: $confirmRemove) {
+            Button("Gỡ dự án", role: .destructive) { model.removeProject() }
+        } message: {
+            Text("Chuyển vào Thùng rác: cả thư mục \(o.paths.workspace.path) (mã nguồn, .agentteam, graphify-out) và lịch sử phiên Claude Code, Codex, Antigravity mà dự án này đã chạy. Dự án khác không bị đụng tới. Dung lượng được trả lại khi bạn dọn Thùng rác; trước đó vẫn khôi phục được.")
+        }
+        .alert("Không gỡ được dự án", isPresented: Binding(get: { removeRefusal != nil }, set: { if !$0 { removeRefusal = nil } })) {
+            Button("OK") {}
+        } message: { Text(removeRefusal ?? "") }
         .confirmationDialog("Xoá dữ liệu Agent Team của \(o.paths.workspace.lastPathComponent)?", isPresented: $confirmDelete) {
             Button("Chuyển vào Thùng rác", role: .destructive) { model.deleteProjectData() }
         } message: {

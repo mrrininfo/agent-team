@@ -41,11 +41,14 @@ public func resolveLocal(_ url: URL, root: URL) -> URL? {
 
 /// Turns file paths that exist (bare or in `code`) into markdown links, so agents' "see report X" is clickable.
 public func linkifyPaths(_ text: String, root: URL) -> String {
-    let pattern = #"`([^`\n]+)`|(?<![\[(\w/.\-])((?:~/|\.{1,2}/|/)?[\w@+\-]+(?:[./][\w@+\-]+)*\.[A-Za-z0-9]{1,8}(?::\d+)?)"#
+    // A markdown link or ``` block the agent wrote is matched first and kept whole: links inside would break the
+    // link or show as raw "[x](x)" in code.
+    let pattern = #"```[\s\S]*?```|\[[^\]\n]*\]\((?:<[^>\n]*>|[^)\s]*)\)|`([^`\n]+)`|(?<![\[(\w/.\-])((?:~/|\.{1,2}/|/)?[\w@+\-]+(?:[./][\w@+\-]+)*\.[A-Za-z0-9]{1,8}(?::\d+)?)"#
     guard let re = try? NSRegularExpression(pattern: pattern) else { return text }
     let ns = text as NSString
     var out = "", last = 0
     for m in re.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+        if m.range(at: 1).location == NSNotFound && m.range(at: 2).location == NSNotFound { continue }
         let r = m.range(at: 1).location != NSNotFound ? m.range(at: 1) : m.range(at: 2)
         let token = ns.substring(with: r)
         guard !token.contains(where: { "[]()<>".contains($0) }),
