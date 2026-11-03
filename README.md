@@ -23,7 +23,7 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
      hẳn thì dùng **Đổi hàng loạt**.
 3. Bấm **+** cạnh Lead để mở chat và gửi yêu cầu. Lead giao việc bằng:
    ```bash
-   agentteam dispatch --from <chatId> --to worker --new-task "Sửa nút Lưu" "phạm vi, đầu ra, bằng chứng"
+   agentteam dispatch --from <chatId> --to worker --card .agentteam/tasks/<id>.md --new-task "Sửa nút Lưu" "ghi chú thêm"
    ```
    Kết quả của Worker tự quay về chat của Lead. Nhiều kết quả đến cùng lúc được gộp vào một lượt.
 4. Khi bị limit:
@@ -34,6 +34,9 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
      không cần ai bấm (học từ cơ chế auto-resume của agent-teams-ai).
 
 5. **Bộ mẫu team** (ngay trên danh sách vị trí): Mặc định, Design (tạo ảnh), Assistant (hỏi đáp kiểu chatbot).
+   Mặc định: Lead điều phối → Planner lập kế hoạch (việc nhiều phần, `.agentteam/plans/`) rồi viết thẻ việc + khung code → Testing viết test trước → Worker làm theo thẻ
+   (bắt buộc `--card`) → Testing nghiệm thu và phân loại lỗi (app tự trả lỗi về đúng ghế) → Critic chấm đáp án cuối;
+   Research tìm hiểu khi cần. Dự án đang dùng bộ Mặc định cũ thì chọn lại "Mặc định" để lấy bộ mới.
    Sửa vai trò/vị trí thì thành **Custom (chưa lưu)**; bấm **Lưu Custom** để giữ. Custom chỉ thuộc dự án đó.
 6. **Provider**: đèn xanh = đã đăng nhập, cam = đang bị limit, đỏ = chưa đăng nhập/không tìm thấy CLI, xám = tắt.
    **Login/Logout** mở Terminal chạy lệnh đăng nhập của CLI (Antigravity: gõ `/login` hoặc `/logout` trong TUI).

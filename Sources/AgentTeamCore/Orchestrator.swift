@@ -464,6 +464,25 @@ public final class Orchestrator {
     /// Each debate round costs the Lead two callback turns, so the loop guard never cuts a debate the user configured.
     var autoTurnCap: Int { max(team.maxAutoTurns, (team.debateRounds ?? 2) * 2 + 6) }
 
+    /// The automatic review loops, worded with this team's seat names; empty when the team lacks those seats.
+    public static func reviewHelp(_ team: Team) -> String {
+        func name(_ id: String) -> String? { team.agents.contains { $0.roleId == id } ? team.role(id)?.name : nil }
+        var lines: [String] = []
+        if let p = name("planner"), let c = name("critic") {
+            lines.append("""
+              - Phản biện: thêm `--debate critic` (vd. `--to planner --debate critic`). App tự chuyển qua lại \(p) ↔ \(c)
+                tới khi \(c) ghi "\(Relay.agreed)" hoặc hết số vòng ở mục Thảo luận; bạn chỉ nhận bản chốt kèm ý kiến cuối của \(c).
+            """)
+        }
+        if let w = name("worker"), let t = name("testing") {
+            lines.append("""
+              - Làm + nghiệm thu: thêm `--verify testing` (vd. `--to worker --verify testing`). \(t) KHÔNG ĐẠT thì app tự gửi lại
+                \(w) sửa (tối đa 3 vòng, đổi bằng `--rounds N`); bạn chỉ nhận kết luận cuối.
+            """)
+        }
+        return lines.isEmpty ? "" : "- Tự rà soát, không cần bạn chuyển tay (tiết kiệm lượt của bạn):\n" + lines.joined(separator: "\n")
+    }
+
     func preamble(_ chat: Chat, _ agent: Agent, _ role: Role) -> String {
         var s = """
         # AGENT TEAM — HỢP ĐỒNG VAI TRÒ
@@ -501,11 +520,7 @@ public final class Orchestrator {
             - Tự điều phối tới khi xong: chỉ trả lời người dùng khi đã có kết quả hoàn chỉnh cho yêu cầu, hoặc bị chặn thật sự cần họ quyết định.
             - ACK `queued/started` chỉ là đã xếp hàng. Giao xong thì kết thúc lượt; kết quả tự gửi về chat này.
             - Xem đầy đủ một kết quả bị cắt: `agentteam show <chatId>`.
-            - Tự rà soát, không cần bạn chuyển tay (tiết kiệm lượt của bạn):
-              - Phản biện: thêm `--debate critic` (vd. `--to planner --debate critic`). App tự chuyển qua lại planner ↔ critic
-                tới khi critic ghi "\(Relay.agreed)" hoặc hết số vòng ở mục Thảo luận; bạn chỉ nhận bản chốt kèm ý kiến cuối của critic.
-              - Làm + nghiệm thu: thêm `--verify testing` (vd. `--to worker --verify testing`). Testing KHÔNG ĐẠT thì app tự gửi lại
-                worker sửa (tối đa 3 vòng, đổi bằng `--rounds N`); bạn chỉ nhận kết luận cuối.
+            \(Self.reviewHelp(team))
 
             \(cardRule)## Đề bài
             - App ghi nguyên văn mọi tin người dùng gửi bạn vào `\(paths.briefFile(chat.id).path)` và gắn đề bài lên đầu mỗi lượt.
@@ -515,7 +530,7 @@ public final class Orchestrator {
             - Xong hẳn việc (người dùng đã nhận đáp án cuối) thì chạy `agentteam brief done`.
 
             ## Thảo luận
-            - Số vòng phản biện planner ↔ critic tối đa: \(team.debateRounds ?? 2) (con số này thay cho số vòng ghi trong hợp đồng; người dùng ghi số khác thì theo người dùng).
+            - Số vòng phản biện (`--debate`) tối đa: \(team.debateRounds ?? 2) (con số này thay cho số vòng ghi trong hợp đồng; người dùng ghi số khác thì theo người dùng).
             """
         }
         if graphUpdater != nil, FileManager.default.fileExists(atPath: paths.graphFile.path) {
@@ -1038,9 +1053,9 @@ public final class Orchestrator {
     /// Moves a relay one step after a turn finished. Returns true when the result was routed by the relay
     /// (to the reviewer, back to the doer, or as the final outcome) instead of the normal callback.
     func relayStep(_ c: Chat, final: String) -> Bool {
-        // The Architect fixed the task card after a SPEC_GAP: the doer redoes the work, then verification continues.
+        // The Planner fixed the task card after a SPEC_GAP: the doer redoes the work, then verification continues.
         if let dId = c.replyTo, let d = chat(dId), d.relay?.fixerChat == c.id {
-            enqueue(dId, "[Architect đã sửa thẻ việc/khung · chat \(c.id)]\n\(final)\n\nĐọc lại thẻ việc rồi làm lại theo bản mới và báo.", kind: .callback)
+            enqueue(dId, "[\(roleName(c.agentId)) đã sửa thẻ việc/khung · chat \(c.id)]\n\(final)\n\nĐọc lại thẻ việc rồi làm lại theo bản mới và báo.", kind: .callback)
             return true
         }
         // The doer finished: its result goes to the reviewer.
@@ -1088,7 +1103,7 @@ public final class Orchestrator {
         return true
     }
 
-    /// A failed verification round: stop if nothing progressed, else route by the Verifier's classification.
+    /// A failed verification round: stop if nothing progressed, else route by the Testing seat's classification.
     func routeVerifyFailure(reviewerId: String, doerId dId: String, final: String, diff: String?) {
         guard let c = chat(reviewerId), let d = chat(dId), var r = d.relay, r.reviewerChat == reviewerId else { return }
         r.round += 1
@@ -1363,14 +1378,14 @@ public final class Orchestrator {
         guard dispatchCount[r.from, default: 0] < team.maxDispatchPerTurn else {
             return reject("Vượt quá \(team.maxDispatchPerTurn) lần giao trong một lượt.")
         }
-        guard let agent = team.agent(r.to) ?? team.agents.first(where: { $0.roleId == r.to }) else {
+        guard let agent = team.member(r.to) else {
             return reject("Không có agent/vai trò '\(r.to)'. Xem: agentteam agents")
         }
         guard !r.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return reject("Nội dung giao việc trống.")
         }
         var body = r.body
-        // Notes to an Executor chat that already holds its card (--tab) need no new card.
+        // Notes to a Worker chat that already holds its card (--tab) need no new card.
         if let role = team.role(agent.roleId), role.requiresCard == true, r.card != nil || r.tab == nil {
             guard let path = r.card else {
                 return reject("Giao \(role.name) cần --card <đường dẫn thẻ việc trong .agentteam/tasks/> có đủ mục: \(TaskCard.sections.joined(separator: ", ")).")
@@ -1389,7 +1404,7 @@ public final class Orchestrator {
         }
         var relay: Relay?
         if let rv = r.reviewer {
-            guard let reviewer = team.agent(rv) ?? team.agents.first(where: { $0.roleId == rv }), reviewer.id != agent.id else {
+            guard let reviewer = team.member(rv), reviewer.id != agent.id else {
                 return reject("Không có agent/vai trò rà soát '\(rv)' (phải khác người làm). Xem: agentteam agents")
             }
             let mode = r.mode ?? .verify

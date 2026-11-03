@@ -7,6 +7,9 @@ func check(_ ok: Bool, _ what: String, line: Int = #line) {
     if !ok { failures += 1; print("FAIL line \(line): \(what)") }
 }
 
+/// Generic dispatch scenarios exercise routing, not task cards (taskCardScenario covers those).
+func dropCards(_ t: inout Team) { for i in t.roles.indices { t.roles[i].requiresCard = nil } }
+
 // Parsers & Limit Detection
 do {
     var p = OutputParser(.claude)
@@ -58,7 +61,7 @@ Quota.codexSessionsOverride = tempQuotaDir.appendingPathComponent("codex_session
 // Built-in template: the user's chosen roles/providers; Planner and Critic stay on different model families.
 do {
     var t = Team.starter()
-    check(Set(t.roles.map(\.id)) == ["lead", "planner", "critic", "worker", "testing"], "template roles")
+    check(Set(t.roles.map(\.id)) == ["lead", "planner", "critic", "worker", "testing", "research"], "template roles")
     func provider(_ role: String) -> Provider? { t.agents.first { $0.roleId == role }.flatMap(t.effectiveProfile)?.provider }
     check(provider("planner") != provider("critic"), "planner/critic differ")
     check(provider("worker") == .antigravity && t.maxConcurrent == 5 && t.debateRounds == 3 && t.maxAutoTurns == 30, "starter settings")
@@ -451,6 +454,7 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     }
     o.gitStatus = { _ in nil }
     o.team = Team.starter()  // independent of a template the user saved
+    dropCards(&o.team)
     o.team.goalCheck = false  // this scenario asserts exact prompt order; goalCheckScenario covers the extra Critic turn
     let li = o.team.agents.firstIndex { $0.roleId == "lead" }!
     o.team.agents[li].profile = Profile(.claude, "opus")
@@ -812,6 +816,7 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
         return nil
     }
     o.gitStatus = { _ in nil }
+    dropCards(&o.team)
     for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
     let lead = o.team.agents.first { $0.roleId == "lead" }!
     let leadChat = o.newChat(agentId: lead.id, title: "L")
@@ -1311,18 +1316,19 @@ do {
 }
 
 do {
-    let lite = TeamPreset.lite34.setup
-    check(lite.roles.count == 6 && Set(lite.roles.map(\.id)) == ["lead", "planner", "critic", "worker", "testing", "research"],
-          "v3.4 preset has the five seats plus Research, keeping role ids")
+    let lite = TeamPreset.standard.setup
+    check(lite.roles.count == 6 && lite.roles.map(\.id) == ["lead", "planner", "critic", "worker", "testing", "research"]
+          && lite.roles.map(\.name) == ["Lead", "Planner", "Critic", "Worker", "Testing", "Research"],
+          "default preset is the v3.4 flow under the familiar seat names, plus Research")
     check(lite.roles.first { $0.id == "worker" }?.requiresCard == true && lite.roles.filter { $0.requiresCard == true }.count == 1,
-          "only the v3.4 Executor requires a task card")
-    check(Team.starter().roles.allSatisfy { $0.requiresCard != true } && TeamPreset.standard.setup.sameShape(as: Team.starter().setup),
-          "standard preset unchanged")
+          "only the Worker requires a task card")
+    check(TeamPreset.standard.setup.sameShape(as: Team.starter().setup) && TeamPreset.allCases.map(\.title) == ["Mặc định", "Design", "Assistant"],
+          "starter is the Mặc định preset; no separate v3.4 preset")
     let old = #"{"id":"x","name":"X","contract":"c","access":"write","canDispatch":false,"fallbacks":[]}"#
     check((try? jsonDecoder.decode(Role.self, from: Data(old.utf8)))?.requiresCard == nil, "roles saved before requiresCard still decode")
     let critic = lite.agents.first { $0.roleId == "critic" }!.profile.provider
     let architect = lite.agents.first { $0.roleId == "planner" }!.profile.provider
-    check(critic != architect, "Critic runs on a different model family than the Architect")
+    check(critic != architect, "Critic runs on a different model family than the Planner")
 }
 
 // Work for a role that requires a card is refused until the card has every section.
@@ -1331,7 +1337,7 @@ do {
     try FileManager.default.createDirectory(at: dir.appendingPathComponent(".agentteam/tasks"), withIntermediateDirectories: true)
     let o = try Orchestrator(workspace: dir) { _, _, _, _ in nil }
     o.gitStatus = { _ in nil }
-    o.applySetup(TeamPreset.lite34.setup)
+    o.applySetup(TeamPreset.standard.setup)
     let lead = o.newChat(agentId: o.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
     func send(_ card: String?) -> DispatchAck {
         o.handle(DispatchRequest(from: lead, to: "worker", title: "w", tab: nil, body: "ghi chú thêm", card: card))
@@ -1352,12 +1358,29 @@ do {
     check(ok.disposition == "queued" && w?.messages.last?.text.contains("## Khung code") == true && w?.messages.last?.text.contains("ghi chú thêm") == true,
           "a complete card is delivered with the notes")
     check(TaskCard.missing(in: "## Mục tiêu\n\n## File được sửa\nx").contains("Mục tiêu"), "a section with an empty body counts as missing")
+    // Seats can be addressed by their shown name too (renamed seats in custom teams).
+    var byName = DispatchRequest(from: lead, to: "Worker", title: "w2", tab: nil, body: "x", card: ".agentteam/tasks/ok.md")
+    byName.reviewer = "Testing"
+    let named = o.handle(byName)
+    check(named.disposition == "queued" && named.chatId.flatMap(o.chat).map { o.team.agent($0.agentId)?.roleId } == "worker",
+          "dispatch --to Worker --verify Testing reaches the worker seat (\(named.reason ?? ""))")
+    let leadContract = o.team.role("lead")!.contract
+    check(!["Architect", "Executor", "Verifier"].contains { leadContract.contains($0) } && leadContract.contains("research"),
+          "Lead contract uses the familiar seat names and mentions research")
+    let plannerContract = o.team.role("planner")!.contract
+    check(plannerContract.contains(".agentteam/plans/") && leadContract.contains(".agentteam/plans/"),
+          "Planner writes a plan for multi-part work and the Lead follows it part by part")
+    let help = Orchestrator.reviewHelp(o.team)
+    check(help.contains("--to planner --debate critic") && help.contains("Testing KHÔNG ĐẠT"),
+          "Lead prompt examples use the team's own seat names (\(help))")
+    let design = Team(roles: TeamPreset.design.setup.roles, agents: TeamPreset.design.setup.agents)
+    check(Orchestrator.reviewHelp(design).isEmpty, "teams without planner/critic/worker/testing get no review examples")
 
     let std = try Orchestrator(workspace: dir.appendingPathComponent("std")) { _, _, _, _ in nil }
     std.gitStatus = { _ in nil }
     let l2 = std.newChat(agentId: std.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
-    check(std.handle(DispatchRequest(from: l2, to: "worker", title: "w", tab: nil, body: "làm")).disposition == "queued",
-          "standard preset still dispatches without a card")
+    check(std.handle(DispatchRequest(from: l2, to: "worker", title: "w", tab: nil, body: "làm")).disposition == "rejected",
+          "a new project starts on the default team, whose Worker needs a card")
     for c in o.chats + std.chats { o.stop(c.id); std.stop(c.id) }
     try? FileManager.default.removeItem(at: dir)
 }
@@ -1383,7 +1406,7 @@ do {
     box.o = o
     o.gitStatus = { _ in nil }
     o.gitDiff = { _ in diffBox.d.isEmpty ? shortId() : diffBox.d.removeFirst() }
-    o.applySetup(TeamPreset.lite34.setup)
+    o.applySetup(TeamPreset.standard.setup)
     for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
     o.team.roles = o.team.roles.map { var r = $0; r.fallbacks = []; return r }
     let lead = o.newChat(agentId: o.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
@@ -1444,7 +1467,7 @@ do {
     }
     box.o = o
     o.gitStatus = { _ in nil }
-    o.applySetup(TeamPreset.lite34.setup)
+    o.applySetup(TeamPreset.standard.setup)
     for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
     o.team.roles = o.team.roles.map { var r = $0; r.fallbacks = []; return r }
     o.team.goalCheck = enabled
@@ -1475,7 +1498,7 @@ do {
 }
 
 do {
-    let team = Team(roles: TeamPreset.lite34.setup.roles, agents: TeamPreset.lite34.setup.agents)
+    let team = Team(roles: TeamPreset.standard.setup.roles, agents: TeamPreset.standard.setup.agents)
     func chat(_ role: String, _ st: ChatStatus) -> Chat {
         var c = Chat(agentId: team.agents.first { $0.roleId == role }!.id, title: role)
         c.status = st
@@ -1547,6 +1570,7 @@ do {
     box.o = o
     o.gitStatus = { _ in nil }
     o.applySetup(TeamPreset.standard.setup)
+    dropCards(&o.team)
     for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
     o.team.roles = o.team.roles.map { var r = $0; r.fallbacks = []; return r }
     o.team.maxConcurrent = 5
@@ -1600,7 +1624,7 @@ do {
         return nil
     }
     o.gitStatus = { _ in nil }
-    o.applySetup(TeamPreset.lite34.setup)
+    o.applySetup(TeamPreset.standard.setup)
     let leadAgent = o.team.agents.first { $0.roleId == "lead" }!.id
     let a = o.newChat(agentId: leadAgent, title: "a"), b = o.newChat(agentId: leadAgent, title: "b")
     func settle() async { for _ in 0..<600 where o.chats.contains(where: { [.running, .queued].contains($0.status) }) { try? await Task.sleep(nanoseconds: 5_000_000) } }
