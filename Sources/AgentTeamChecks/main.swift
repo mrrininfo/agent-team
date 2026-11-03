@@ -1469,6 +1469,22 @@ do {
     check(direct.critic == 0 && direct.lead == 1, "an answer with no dispatched work is not checked")
 }
 
+do {
+    let team = Team(roles: TeamPreset.lite34.setup.roles, agents: TeamPreset.lite34.setup.agents)
+    func chat(_ role: String, _ st: ChatStatus) -> Chat {
+        var c = Chat(agentId: team.agents.first { $0.roleId == role }!.id, title: role)
+        c.status = st
+        return c
+    }
+    var goal = chat("critic", .running)
+    goal.goalCheckFor = "x"
+    check(PipelineStage.of(chat("lead", .running), team: team) == .brief && PipelineStage.of(chat("testing", .queued), team: team) == .verify
+          && PipelineStage.of(chat("planner", .running), team: team) == .card && PipelineStage.of(chat("worker", .running), team: team) == .build,
+          "active chats map to their pipeline stage")
+    check(PipelineStage.of(chat("worker", .done), team: team) == nil && PipelineStage.of(goal, team: team) == .goal
+          && PipelineStage.of(chat("research", .running), team: team) == nil, "finished and off-pipeline chats have no stage; goal checks are last")
+}
+
 try await scenario()
 try await goalCheckScenario()
 try await failureRoutingScenario()

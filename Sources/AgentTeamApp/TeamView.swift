@@ -11,16 +11,29 @@ struct TeamView: View {
     @State private var newRoleName = ""
     @State private var pendingSetup: (title: String, setup: TeamSetup)?
     @State private var addingKey: Provider?
+    @AppStorage("teamDetailsShown") private var detailsShown = false
+    /// Opens a chat from the pipeline board.
+    var openChat: (String) -> Void = { _ in }
     private var accounts: Accounts { Accounts.shared }
 
     var body: some View {
         Form {
+            overview
+            pipeline
             providers
             presets
-            agents
-            bulk
-            roles
-            operations
+            Section {
+                Button(detailsShown ? "Ẩn cài đặt chi tiết" : "Cài đặt chi tiết: vị trí, đổi hàng loạt, hợp đồng vai trò, vận hành…") {
+                    detailsShown.toggle()
+                }
+                .buttonStyle(.link)
+            }
+            if detailsShown {
+                agents
+                bulk
+                roles
+                operations
+            }
         }
         .formStyle(.grouped)
         .task { await accounts.refresh(o.team.binaryPaths) }
@@ -217,6 +230,73 @@ struct TeamView: View {
             Text("Chỉ áp dụng cho dự án này. Sửa vai trò/vị trí sẽ thành Custom; dự án khác không bị ảnh hưởng.")
                 .font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    /// One card per seat: who it is, what it does, which model runs it now, and how it is doing.
+    var overview: some View {
+        Section("Đội") {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 10)], spacing: 10) {
+                ForEach(o.team.agents) { agent in
+                    let role = o.team.role(agent.roleId)
+                    let eff = o.team.effectiveProfile(for: agent)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Circle().fill(seatStatus(agent.id)?.color ?? .gray).frame(width: 8, height: 8)
+                            Text(role?.name ?? agent.roleId).bold()
+                            Spacer()
+                            Text(role?.access.title ?? "").font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Text(role.map { Self.firstSentence($0.contract) } ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        Text(eff?.label ?? "không khả dụng").font(.caption.monospaced())
+                            .foregroundStyle(eff == nil ? Color.red : eff == agent.profile ? .primary : .orange).lineLimit(1)
+                        if let fb = role?.fallbacks, !fb.isEmpty {
+                            Text("dự phòng: " + fb.map(\.label).joined(separator: " → ")).font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
+                        }
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.08)))
+                }
+            }
+        }
+    }
+
+    /// Active chats by step of the flow; click one to open it.
+    var pipeline: some View {
+        Section("Luồng việc") {
+            let active = o.chats.compactMap { c in PipelineStage.of(c, team: o.team).map { (c, $0) } }
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(PipelineStage.allCases) { stage in
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(stage.title).font(.caption.bold()).foregroundStyle(.secondary)
+                        let items = active.filter { $0.1 == stage }.map(\.0)
+                        if items.isEmpty { Text("—").font(.caption).foregroundStyle(.tertiary) }
+                        ForEach(items) { c in
+                            Button { openChat(c.id) } label: {
+                                HStack(spacing: 4) {
+                                    Circle().fill(c.status.color).frame(width: 6, height: 6)
+                                    Text(c.title).font(.caption).lineLimit(2).multilineTextAlignment(.leading)
+                                }
+                            }
+                            .buttonStyle(.plain)
+                            .help("Mở chat \(c.id)")
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    func seatStatus(_ agentId: String) -> ChatStatus? {
+        let cs = o.chats(of: agentId)
+        for st in [ChatStatus.running, .queued, .limited] where cs.contains(where: { $0.status == st }) { return st }
+        return cs.last?.status
+    }
+
+    static func firstSentence(_ s: String) -> String {
+        let line = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? s
+        return line.firstIndex(of: ".").map { String(line[...$0]) } ?? line
     }
 
     var agents: some View {

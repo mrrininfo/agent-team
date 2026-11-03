@@ -138,7 +138,7 @@ struct MainView: View {
                 Group {
                     switch selection {
                     case .chat(let id): ChatView(o: o, chatId: id, focus: focusMessage).id(id)
-                    default: TeamView(o: o)
+                    default: TeamView(o: o, openChat: { selection = .chat($0) })
                     }
                 }
             }
