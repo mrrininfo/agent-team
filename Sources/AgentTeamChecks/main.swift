@@ -1323,7 +1323,45 @@ do {
     check(critic != architect, "Critic runs on a different model family than the Architect")
 }
 
+// Work for a role that requires a card is refused until the card has every section.
+@MainActor func taskCardScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-card-\(shortId())")
+    try FileManager.default.createDirectory(at: dir.appendingPathComponent(".agentteam/tasks"), withIntermediateDirectories: true)
+    let o = try Orchestrator(workspace: dir) { _, _, _, _ in nil }
+    o.gitStatus = { _ in nil }
+    o.applySetup(TeamPreset.lite34.setup)
+    let lead = o.newChat(agentId: o.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
+    func send(_ card: String?) -> DispatchAck {
+        o.handle(DispatchRequest(from: lead, to: "worker", title: "w", tab: nil, body: "ghi chú thêm", card: card))
+    }
+    let full = "## Mục tiêu\nx\n## File được sửa\na.swift\n## Khung code\nfunc f()\n## Test nghiệm thu\nswift test\n## Ngoài phạm vi\nkhông"
+    try full.write(to: dir.appendingPathComponent(".agentteam/tasks/ok.md"), atomically: true, encoding: .utf8)
+    try "## Mục tiêu\nx\n## File được sửa\na\n## Test nghiệm thu\nt".write(to: dir.appendingPathComponent(".agentteam/tasks/half.md"), atomically: true, encoding: .utf8)
+
+    let none = send(nil)
+    check(none.disposition == "rejected" && none.reason?.contains("--card") == true, "executor work without a card is refused")
+    let half = send(".agentteam/tasks/half.md")
+    check(half.disposition == "rejected" && half.reason?.contains("Khung code") == true && half.reason?.contains("Ngoài phạm vi") == true,
+          "a card missing sections is refused, naming them (\(half.reason ?? ""))")
+    check(send("../x.md").disposition == "rejected" && send("/etc/hosts").disposition == "rejected" && send(".agentteam/tasks/nope.md").disposition == "rejected",
+          "cards outside the workspace or missing are refused")
+    let ok = send(".agentteam/tasks/ok.md")
+    let w = ok.chatId.flatMap(o.chat)
+    check(ok.disposition == "queued" && w?.messages.last?.text.contains("## Khung code") == true && w?.messages.last?.text.contains("ghi chú thêm") == true,
+          "a complete card is delivered with the notes")
+    check(TaskCard.missing(in: "## Mục tiêu\n\n## File được sửa\nx").contains("Mục tiêu"), "a section with an empty body counts as missing")
+
+    let std = try Orchestrator(workspace: dir.appendingPathComponent("std")) { _, _, _, _ in nil }
+    std.gitStatus = { _ in nil }
+    let l2 = std.newChat(agentId: std.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
+    check(std.handle(DispatchRequest(from: l2, to: "worker", title: "w", tab: nil, body: "làm")).disposition == "queued",
+          "standard preset still dispatches without a card")
+    for c in o.chats + std.chats { o.stop(c.id); std.stop(c.id) }
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await taskCardScenario()
 try await briefScenario()
 try await accountRotationScenario()
 try await eventBurstScenario()

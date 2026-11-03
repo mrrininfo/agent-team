@@ -6,7 +6,7 @@ agentteam — giao việc giữa các agent trong Agent Team
 
   agentteam agents
   agentteam dispatch [--from <chatId>] --to <agentId|role> (--new-task "<tiêu đề>" | --tab <chatId>)
-                     [--debate <role> | --verify <role>] [--rounds N] "<nội dung>" | -
+                     [--debate <role> | --verify <role>] [--rounds N] [--card <thẻ việc .md>] "<nội dung>" | -
   agentteam show <chatId>          # trả lời cuối của một chat
   agentteam brief done             # đóng đề bài đang làm của chat này (việc đã xong)
   agentteam status <handoffId>     # ACK của một lần giao
@@ -63,6 +63,7 @@ case "dispatch":
     let tab = option("--tab")
     let debate = option("--debate"), verify = option("--verify")
     let rounds = option("--rounds")
+    let card = option("--card")
     guard debate == nil || verify == nil else { fail("Chỉ dùng một trong --debate hoặc --verify.") }
     guard rounds.map({ Int($0) != nil }) ?? true else { fail("--rounds phải là số.") }
     guard let from else { fail("Thiếu --from <chatId>.") }
@@ -72,7 +73,7 @@ case "dispatch":
     if body == "-" { body = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self) }
     guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { fail("Thiếu nội dung giao việc.") }
     let req = DispatchRequest(from: from, to: to, title: title, tab: tab, body: body, reviewer: debate ?? verify,
-                              mode: debate != nil ? .debate : verify != nil ? .verify : nil, rounds: rounds.flatMap { Int($0) })
+                              mode: debate != nil ? .debate : verify != nil ? .verify : nil, rounds: rounds.flatMap { Int($0) }, card: card)
     let tmp = paths.inbox.appendingPathComponent(".\(req.id).tmp")
     do {
         try jsonEncoder.encode(req).write(to: tmp)

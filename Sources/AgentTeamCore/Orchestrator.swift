@@ -434,6 +434,9 @@ public final class Orchestrator {
         \(role.contract)
         """
         if role.canDispatch {
+            let carded = team.roles.filter { $0.requiresCard == true }.map(\.id)
+            let cardRule = carded.isEmpty ? "" : "- Thẻ việc: giao \(carded.joined(separator: ", ")) phải kèm `--card .agentteam/tasks/<id>.md` có đủ mục "
+                + TaskCard.sections.map { "## \($0)" }.joined(separator: ", ") + "; thiếu thì lệnh bị từ chối và nêu mục thiếu.\n\n"
             s += """
 
 
@@ -465,7 +468,7 @@ public final class Orchestrator {
               - Làm + nghiệm thu: thêm `--verify testing` (vd. `--to worker --verify testing`). Testing KHÔNG ĐẠT thì app tự gửi lại
                 worker sửa (tối đa 3 vòng, đổi bằng `--rounds N`); bạn chỉ nhận kết luận cuối.
 
-            ## Đề bài
+            \(cardRule)## Đề bài
             - App ghi nguyên văn mọi tin người dùng gửi bạn vào `\(paths.briefFile(chat.id).path)` và gắn đề bài lên đầu mỗi lượt.
             - Lượt đầu của một việc mới: viết mục "Tiêu chí xong" (mỗi tiêu chí một dòng, kiểm chứng được) và "Ngoài phạm vi" trong file đó;
               người dùng đổi ý thì sửa lại.
@@ -1256,6 +1259,20 @@ public final class Orchestrator {
         guard !r.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return reject("Nội dung giao việc trống.")
         }
+        var body = r.body
+        if let role = team.role(agent.roleId), role.requiresCard == true {
+            guard let path = r.card else {
+                return reject("Giao \(role.name) cần --card <đường dẫn thẻ việc trong .agentteam/tasks/> có đủ mục: \(TaskCard.sections.joined(separator: ", ")).")
+            }
+            switch TaskCard.load(path, workspace: paths.workspace) {
+            case .failure(.outside): return reject("Thẻ việc \(path) nằm ngoài workspace.")
+            case .failure(.unreadable): return reject("Không đọc được thẻ việc \(path).")
+            case .success(let card):
+                let missing = TaskCard.missing(in: card)
+                guard missing.isEmpty else { return reject("Thẻ việc \(path) thiếu mục: \(missing.joined(separator: ", ")).") }
+                body = "[Thẻ việc: \(path)]\n\(card)\n\n\(r.body)"
+            }
+        }
         var relay: Relay?
         if let rv = r.reviewer {
             guard let reviewer = team.agent(rv) ?? team.agents.first(where: { $0.roleId == rv }), reviewer.id != agent.id else {
@@ -1263,7 +1280,7 @@ public final class Orchestrator {
             }
             let mode = r.mode ?? .verify
             let rounds = r.rounds ?? (mode == .debate ? team.debateRounds ?? 2 : 3)
-            relay = Relay(mode: mode, reviewerAgent: reviewer.id, maxRounds: min(max(rounds, 1), 10), task: r.body)
+            relay = Relay(mode: mode, reviewerAgent: reviewer.id, maxRounds: min(max(rounds, 1), 10), task: body)
         }
 
         let isTab = r.tab != nil
@@ -1282,7 +1299,7 @@ public final class Orchestrator {
 
         // 4. ATOMIC COMMIT to chat file on disk BEFORE updating RAM state
         let fromRole = team.role(fromAgent.roleId)?.name ?? fromAgent.roleId
-        let taskText = "[Giao việc từ \(fromRole) \(fromAgent.id) · handoff \(r.id)]\n" + r.body
+        let taskText = "[Giao việc từ \(fromRole) \(fromAgent.id) · handoff \(r.id)]\n" + body
 
         var updatedDiskChat = targetChat
         updatedDiskChat.replyTo = r.from
