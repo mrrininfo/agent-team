@@ -53,7 +53,7 @@ public final class Orchestrator {
     @ObservationIgnored public var cancelTurn: (String) -> Void = { _ in }
     @ObservationIgnored public var gitStatus: (URL) -> String? = Orchestrator.defaultGitStatus
     /// `git diff --stat HEAD`, compared between verification rounds to notice a loop that changes nothing.
-    @ObservationIgnored public var gitDiff: (URL) -> String? = Orchestrator.defaultGitDiff
+    @ObservationIgnored public var gitDiff: @Sendable (URL) -> String? = Orchestrator.defaultGitDiff
     @ObservationIgnored var dispatchCount: [String: Int] = [:]
     @ObservationIgnored var stopping: Set<String> = []
     @ObservationIgnored var timer: Timer?
@@ -410,6 +410,10 @@ public final class Orchestrator {
         }
         update(to) { $0.replyTo = s.replyTo ?? $0.replyTo }
         update(from) { $0.replyTo = nil }
+        if briefBlock(s) != nil, let t = chat(to), team.agent(t.agentId).flatMap({ team.role($0.roleId) })?.canDispatch == true {
+            Brief.move(paths.briefFile(from), to: paths.briefFile(to))
+            update(to) { $0.briefDispatched = s.briefDispatched }
+        }
         enqueue(to, pkg, kind: .handoff)
     }
 
@@ -583,7 +587,8 @@ public final class Orchestrator {
                                    inputs: inputs, notes: notes(chatId), gitStatus: gitStatus(paths.workspace), brief: briefBlock(c))
         }
         // The brief goes on top of every turn, resumed ones too: a long session forgets the request after compaction.
-        let prompt = (resumable ? "" : preamble(c, agent, role)) + (briefBlock(c) ?? "") + body
+        let pinned = briefBlock(c).flatMap { body.contains("# ĐỀ BÀI ĐANG LÀM") ? nil : $0 }
+        let prompt = (resumable ? "" : preamble(c, agent, role)) + (pinned ?? "") + body
 
         // R1: Validate argv size before setting inFlight. If exceeded, keep in pending and report error.
         if profile.provider == .antigravity && prompt.utf8.count > Provider.maxAntigravityPromptBytes {
@@ -1070,41 +1075,60 @@ public final class Orchestrator {
             return true
         }
         if r.mode == .verify {
-            let failure = Relay.failures(final), diff = gitDiff(paths.workspace)
-            if (!failure.isEmpty && failure == r.lastFailure) || (diff != nil && diff == r.lastDiff) {
-                update(dId) { $0.relay = nil }
-                let doerFinal = chat(dId)?.messages.last(where: { $0.kind == .assistant })?.text ?? ""
-                callback(from: d, status: "không tiến triển sau \(r.round) vòng (lỗi lặp lại hoặc code không đổi)",
-                         text: doerFinal + "\n\n--- \(roleName(c.agentId)), vòng cuối ---\n" + clip(final, 1500))
-                return true
+            // git diff can take seconds on a big repo: run it off the main thread, then route the failure.
+            let ws = paths.workspace, diffFn = gitDiff, reviewerId = c.id
+            Task { [weak self] in
+                let diff = await Task.detached { diffFn(ws) }.value
+                self?.routeVerifyFailure(reviewerId: reviewerId, doerId: dId, final: final, diff: diff)
             }
-            r.lastFailure = failure
-            r.lastDiff = diff
-            switch Relay.classify(final) {
-            case .specGap?:
-                if let architect = team.agents.first(where: { $0.roleId == "planner" }), architect.id != d.agentId {
-                    if r.fixerChat.flatMap(chat) == nil {
-                        r.fixerChat = newChat(agentId: architect.id, title: "Sửa thẻ việc: " + d.title, replyTo: dId)
-                    }
-                    update(dId) { $0.relay = r }
-                    enqueue(r.fixerChat!, "[SPEC_GAP từ \(roleName(c.agentId)) · vòng \(r.round)/\(r.maxRounds)]\n\(final)\n\n"
-                        + "Nhiệm vụ/thẻ việc hiện tại:\n\(r.task)\n\nSửa thẻ việc hoặc khung code cho đúng rồi báo ngắn đã đổi gì.", kind: .task)
-                    return true
-                }
-            case .verifyDefect?:
-                update(dId) { $0.relay = r }
-                enqueue(c.id, "[Sửa test · vòng \(r.round)/\(r.maxRounds)] Bạn phân loại lỗi là VERIFY_DEFECT: sửa test cho đúng tiêu chí, "
-                    + "chạy lại nghiệm thu với code hiện tại, rồi kết luận theo mẫu (PHÂN LOẠI nếu KHÔNG ĐẠT, rồi KẾT LUẬN).", kind: .task)
-                return true
-            default: break
-            }
+            return true
         }
+        sendBack(dId, r, reviewerAgent: c.agentId, final: final)
+        return true
+    }
+
+    /// A failed verification round: stop if nothing progressed, else route by the Verifier's classification.
+    func routeVerifyFailure(reviewerId: String, doerId dId: String, final: String, diff: String?) {
+        guard let c = chat(reviewerId), let d = chat(dId), var r = d.relay, r.reviewerChat == reviewerId else { return }
+        r.round += 1
+        let failure = Relay.failures(final)
+        if (!failure.isEmpty && failure == r.lastFailure) || (diff != nil && diff == r.lastDiff) {
+            update(dId) { $0.relay = nil }
+            let doerFinal = chat(dId)?.messages.last(where: { $0.kind == .assistant })?.text ?? ""
+            callback(from: d, status: "không tiến triển sau \(r.round) vòng (lỗi lặp lại hoặc code không đổi)",
+                     text: doerFinal + "\n\n--- \(roleName(c.agentId)), vòng cuối ---\n" + clip(final, 1500))
+            return
+        }
+        r.lastFailure = failure
+        r.lastDiff = diff
+        switch Relay.classify(final) {
+        case .specGap?:
+            if let architect = team.agents.first(where: { $0.roleId == "planner" }), architect.id != d.agentId {
+                if r.fixerChat.flatMap(chat) == nil {
+                    r.fixerChat = newChat(agentId: architect.id, title: "Sửa thẻ việc: " + d.title, replyTo: dId)
+                }
+                update(dId) { $0.relay = r }
+                enqueue(r.fixerChat!, "[SPEC_GAP từ \(roleName(c.agentId)) · vòng \(r.round)/\(r.maxRounds)]\n\(final)\n\n"
+                    + "Nhiệm vụ/thẻ việc hiện tại:\n\(r.task)\n\nSửa thẻ việc hoặc khung code cho đúng rồi báo ngắn đã đổi gì.", kind: .task)
+                return
+            }
+        case .verifyDefect?:
+            update(dId) { $0.relay = r }
+            enqueue(c.id, "[Sửa test · vòng \(r.round)/\(r.maxRounds)] Bạn phân loại lỗi là VERIFY_DEFECT: sửa test cho đúng tiêu chí, "
+                + "chạy lại nghiệm thu với code hiện tại, rồi kết luận theo mẫu (PHÂN LOẠI nếu KHÔNG ĐẠT, rồi KẾT LUẬN).", kind: .task)
+            return
+        default: break
+        }
+        sendBack(dId, r, reviewerAgent: c.agentId, final: final)
+    }
+
+    /// The reviewer's objections go back to the doer for another round.
+    func sendBack(_ dId: String, _ r: Relay, reviewerAgent: String, final: String) {
         update(dId) { $0.relay = r }
         let note = r.mode == .debate
             ? "Chấp nhận/bác từng điểm kèm lý do, rồi đưa lại bản đề xuất đầy đủ đã sửa."
             : "Sửa đúng các lỗi trên, chạy lại kiểm tra rồi báo lại."
-        enqueue(dId, "[\(roleName(c.agentId)) · vòng \(r.round)/\(r.maxRounds)]\n\(final)\n\n\(note)", kind: .callback)
-        return true
+        enqueue(dId, "[\(roleName(reviewerAgent)) · vòng \(r.round)/\(r.maxRounds)]\n\(final)\n\n\(note)", kind: .callback)
     }
 
     func callback(from c: Chat, status: String, text: String, turnProfile: Profile? = nil, turnModel: String? = nil) {
@@ -1117,6 +1141,11 @@ public final class Orchestrator {
             }
         }
         guard let target = c.replyTo, chat(target) != nil else { return }
+        // A goal check that could not run is a note for the Lead's chat, not a reason to wake the Lead.
+        if c.goalCheckFor != nil && status.hasPrefix("lỗi") {
+            update(target) { $0.messages.append(Message(.system, "Critic không kiểm tra được đáp án cuối: \(clip(text, 300))")) }
+            return
+        }
         let role = team.agent(c.agentId).flatMap { team.role($0.roleId) }?.name ?? "agent"
         let effective = turnProfile ?? c.runningProfile ?? team.agent(c.agentId).flatMap(team.effectiveProfile)
         let providerTitle = effective?.provider.title ?? "Provider"
@@ -1340,7 +1369,8 @@ public final class Orchestrator {
             return reject("Nội dung giao việc trống.")
         }
         var body = r.body
-        if let role = team.role(agent.roleId), role.requiresCard == true {
+        // Notes to an Executor chat that already holds its card (--tab) need no new card.
+        if let role = team.role(agent.roleId), role.requiresCard == true, r.card != nil || r.tab == nil {
             guard let path = r.card else {
                 return reject("Giao \(role.name) cần --card <đường dẫn thẻ việc trong .agentteam/tasks/> có đủ mục: \(TaskCard.sections.joined(separator: ", ")).")
             }
@@ -1350,6 +1380,9 @@ public final class Orchestrator {
             case .success(let card):
                 let missing = TaskCard.missing(in: card)
                 guard missing.isEmpty else { return reject("Thẻ việc \(path) thiếu mục: \(missing.joined(separator: ", ")).") }
+                guard card.count <= TaskCard.maxLength else {
+                    return reject("Thẻ việc \(path) quá dài (\(card.count / 1000) KB > \(TaskCard.maxLength / 1000) KB): tách nhỏ việc hoặc trỏ tới file khung thay vì dán nội dung.")
+                }
                 body = "[Thẻ việc: \(path)]\n\(card)\n\n\(r.body)"
             }
         }

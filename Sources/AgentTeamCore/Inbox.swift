@@ -31,12 +31,18 @@ public struct DispatchRequest: Codable, Sendable {
     }
 
     /// Stable SHA-256 fingerprint of the request payload to detect replays vs conflicting payloads.
-    public var fingerprint: String {
+    public var fingerprint: String { Self.hash(baseRaw + (card.map { "|card:\($0)" } ?? "")) }
+    /// The fingerprint an app from before `--card` computes (it drops the unknown field), so the CLI can tell
+    /// a version mismatch from a real conflict.
+    public var legacyFingerprint: String { Self.hash(baseRaw) }
+
+    private var baseRaw: String {
         var raw = "\(from)|\(to)|\(title ?? "")|\(tab ?? "")|\(body)"
         if let reviewer { raw += "|\(reviewer)|\(mode?.rawValue ?? "")|\(rounds ?? 0)" }
-        if let card { raw += "|card:\(card)" }
-        return SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined()
+        return raw
     }
+
+    private static func hash(_ raw: String) -> String { SHA256.hash(data: Data(raw.utf8)).map { String(format: "%02x", $0) }.joined() }
 }
 
 public struct DispatchAck: Codable, Sendable {

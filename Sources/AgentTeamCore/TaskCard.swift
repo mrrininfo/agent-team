@@ -3,6 +3,8 @@ import Foundation
 /// The skeleton a coding role gets with its work: what to build, where, against which tests, and what not to touch.
 public enum TaskCard {
     public static let sections = ["Mục tiêu", "File được sửa", "Khung code", "Test nghiệm thu", "Ngoài phạm vi"]
+    /// The card goes into the prompt verbatim; Antigravity takes it as an argument, which has a size limit.
+    public static let maxLength = 20_000
 
     /// Sections with no `## <name>` heading, or with nothing under it.
     public static func missing(in text: String) -> [String] {
@@ -18,8 +20,9 @@ public enum TaskCard {
     /// The card's text if `path` is a readable file inside `workspace`, else why not.
     public static func load(_ path: String, workspace: URL) -> Result<String, CardError> {
         let ws = workspace.standardizedFileURL.resolvingSymlinksInPath().path
-        let url = (path.hasPrefix("/") ? URL(fileURLWithPath: path) : workspace.appendingPathComponent(path))
-            .standardizedFileURL.resolvingSymlinksInPath()
+        let raw = (path.hasPrefix("/") ? URL(fileURLWithPath: path) : workspace.appendingPathComponent(path)).standardizedFileURL
+        // Resolve through the parent folder: a missing file does not resolve on its own (/var vs /private/var).
+        let url = raw.deletingLastPathComponent().resolvingSymlinksInPath().appendingPathComponent(raw.lastPathComponent).resolvingSymlinksInPath()
         guard url.path.hasPrefix(ws + "/") else { return .failure(.outside) }
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return .failure(.unreadable) }
         return .success(text)

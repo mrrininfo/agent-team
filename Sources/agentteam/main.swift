@@ -81,7 +81,7 @@ case "dispatch":
     } catch { fail("Không ghi được inbox: \(error.localizedDescription)") }
     for _ in 0..<40 {
         if let a = readAck(req.id) {
-            if let ackFp = a.fingerprint, ackFp != req.fingerprint {
+            if let ackFp = a.fingerprint, ackFp != req.fingerprint, ackFp != req.legacyFingerprint {
                 print("handoffId: \(req.id)\ndisposition: rejected\nreason: Xung đột: ID handoff trùng nhưng fingerprint khác.")
                 exit(2)
             }

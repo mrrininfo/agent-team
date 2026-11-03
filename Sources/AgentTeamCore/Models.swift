@@ -184,6 +184,8 @@ public struct Relay: Codable, Hashable, Sendable {
     public static func classify(_ text: String) -> FailureClass? {
         guard let line = text.components(separatedBy: .newlines).last(where: { $0.uppercased().contains("PHÂN LOẠI:") }),
               let r = line.uppercased().range(of: "PHÂN LOẠI:") else { return nil }
+        // The copied template line ("SPEC_GAP | EXECUTION_DEFECT | …") names no class.
+        guard !line.contains("|") else { return nil }
         let v = line.uppercased()[r.upperBound...].filter { !$0.isWhitespace && $0 != "`" && $0 != "*" }
         return FailureClass.allCases.first { v.hasPrefix($0.rawValue) }
     }

@@ -815,7 +815,8 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
     let lead = o.team.agents.first { $0.roleId == "lead" }!
     let leadChat = o.newChat(agentId: lead.id, title: "L")
-    func settle() async { for _ in 0..<400 where o.chats.contains(where: { [.running, .queued].contains($0.status) }) { try? await Task.sleep(nanoseconds: 5_000_000) } }
+    // A relay between rounds has no running chat while git diff runs off the main thread; wait for it too.
+    func settle() async { for _ in 0..<400 where o.chats.contains(where: { [.running, .queued].contains($0.status) || $0.relay != nil }) { try? await Task.sleep(nanoseconds: 5_000_000) } }
     o.send("bắt đầu", to: leadChat)
     await settle()
     leadTurns = 0
@@ -1280,7 +1281,7 @@ do {
     o.send("Tin lúc đang chạy QQQ", to: c)
     await idle()
     let file = o.paths.briefFile(c)
-    check((try? String(contentsOf: file, encoding: .utf8))?.contains("Tin lúc đang chạy QQQ") == true, "a message sent while the Lead runs is pinned too")
+    check((try? String(contentsOf: Brief.requestsFile(file), encoding: .utf8))?.contains("Tin lúc đang chạy QQQ") == true, "a message sent while the Lead runs is pinned too")
 
     let worker = o.team.agents.first { $0.roleId == "worker" }!
     let w = o.newChat(agentId: worker.id, title: "w")
@@ -1297,7 +1298,7 @@ do {
 
     o.closeBrief(c)
     let done = (try? FileManager.default.contentsOfDirectory(atPath: o.paths.briefsDone.path)) ?? []
-    check(!FileManager.default.fileExists(atPath: file.path) && done.count == 1, "closing a brief moves it to briefs/done")
+    check(!FileManager.default.fileExists(atPath: file.path) && done.count == 2, "closing a brief moves both its files to briefs/done")
     let before = prompts.count
     o.send("việc mới", to: c)
     await idle()
@@ -1369,7 +1370,10 @@ do {
     try card.write(to: dir.appendingPathComponent(".agentteam/tasks/ok.md"), atomically: true, encoding: .utf8)
     final class Box { var o: Orchestrator? }
     let box = Box()
-    var roles: [String] = [], v = verdicts, d = diffs
+    final class Diffs: @unchecked Sendable { var d: [String] = [] }
+    let diffBox = Diffs()
+    diffBox.d = diffs
+    var roles: [String] = [], v = verdicts
     let o = try Orchestrator(workspace: dir) { chatId, _, _, emit in
         let role = box.o?.chat(chatId).flatMap { box.o?.team.agent($0.agentId) }?.roleId ?? "?"
         roles.append(role)
@@ -1378,7 +1382,7 @@ do {
     }
     box.o = o
     o.gitStatus = { _ in nil }
-    o.gitDiff = { _ in d.isEmpty ? shortId() : d.removeFirst() }
+    o.gitDiff = { _ in diffBox.d.isEmpty ? shortId() : diffBox.d.removeFirst() }
     o.applySetup(TeamPreset.lite34.setup)
     for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
     o.team.roles = o.team.roles.map { var r = $0; r.fallbacks = []; return r }
@@ -1411,7 +1415,7 @@ do {
 }
 
 // After the Lead's final answer on a dispatched brief, the Critic checks it once against the brief.
-@MainActor func goalCase(verdict: String, enabled: Bool = true, removeCritic: Bool = false, dispatch: Bool = true) async throws
+@MainActor func goalCase(verdict: String, enabled: Bool = true, removeCritic: Bool = false, dispatch: Bool = true, criticError: Bool = false) async throws
     -> (lead: Int, critic: Int, chat: Chat?) {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-goal-\(shortId())")
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1431,6 +1435,7 @@ do {
             }
         case "critic":
             criticTurns += 1
+            if criticError { return "exit 1: boom" }
             emit(.final(verdict))
         default:
             emit(.final("kết quả \(role)"))
@@ -1564,7 +1569,71 @@ do {
     try? FileManager.default.removeItem(at: dir)
 }
 
+// Follow-ups from the review's minor list.
+@MainActor func minorFixesScenario() async throws {
+    let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-minor-\(shortId())")
+    try FileManager.default.createDirectory(at: tmp.appendingPathComponent(".agentteam/tasks"), withIntermediateDirectories: true)
+
+    // The Lead edits its criteria file while the app records requests in another file: neither overwrites the other.
+    let f = tmp.appendingPathComponent("b/lead.md")
+    Brief.record("Q-ONE", at: Date(), file: f)
+    try "## Tiêu chí xong\nLEAD-EDIT\n".write(to: f, atomically: true, encoding: .utf8)
+    Brief.record("Q-TWO", at: Date(), file: f)
+    let blk = Brief.block(f) ?? ""
+    check((try? String(contentsOf: f, encoding: .utf8))?.contains("LEAD-EDIT") == true && blk.contains("Q-ONE") && blk.contains("Q-TWO") && blk.contains("LEAD-EDIT"),
+          "app-recorded requests and the Lead's criteria live in separate files")
+    Brief.close(f, doneDir: tmp.appendingPathComponent("b/done"))
+    check(((try? FileManager.default.contentsOfDirectory(atPath: tmp.appendingPathComponent("b/done").path)) ?? []).count == 2
+          && Brief.block(f) == nil, "closing moves both brief files")
+
+    check(Relay.classify("PHÂN LOẠI: SPEC_GAP | EXECUTION_DEFECT | VERIFY_DEFECT | EVIDENCE_MISSING") == nil, "a copied template line is not a classification")
+    let withCard = DispatchRequest(from: "a", to: "b", title: "t", tab: nil, body: "x", card: "c.md")
+    check(withCard.fingerprint != withCard.legacyFingerprint
+          && withCard.legacyFingerprint == DispatchRequest(from: "a", to: "b", title: "t", tab: nil, body: "x").fingerprint,
+          "the CLI can recognise an ACK from an app that predates --card")
+
+    // Transfer carries the brief; a hand-off prompt holds it once.
+    var prompts: [String: [String]] = [:]
+    let o = try Orchestrator(workspace: tmp) { chatId, req, _, emit in
+        prompts[chatId, default: []].append(req.prompt)
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    o.applySetup(TeamPreset.lite34.setup)
+    let leadAgent = o.team.agents.first { $0.roleId == "lead" }!.id
+    let a = o.newChat(agentId: leadAgent, title: "a"), b = o.newChat(agentId: leadAgent, title: "b")
+    func settle() async { for _ in 0..<600 where o.chats.contains(where: { [.running, .queued].contains($0.status) }) { try? await Task.sleep(nanoseconds: 5_000_000) } }
+    o.send("Q-ORIG", to: a)
+    await settle()
+    o.transfer(from: a, to: b)
+    await settle()
+    check(Brief.block(o.paths.briefFile(b))?.contains("Q-ORIG") == true && Brief.block(o.paths.briefFile(a)) == nil, "transfer moves the pinned brief to the new Lead chat")
+    let hand = prompts[b]?.first ?? ""
+    check(hand.components(separatedBy: "ĐỀ BÀI ĐANG LÀM").count == 2, "a hand-off prompt carries the brief once")
+
+    // Cards: size cap, --tab notes, a clear reason for a missing file.
+    let full = "## Mục tiêu\nx\n## File được sửa\na\n## Khung code\nf\n## Test nghiệm thu\nt\n## Ngoài phạm vi\nn\n"
+    try (full + String(repeating: "x", count: 25_000)).write(to: tmp.appendingPathComponent(".agentteam/tasks/big.md"), atomically: true, encoding: .utf8)
+    try full.write(to: tmp.appendingPathComponent(".agentteam/tasks/ok.md"), atomically: true, encoding: .utf8)
+    func send(_ card: String?, tab: String? = nil) -> DispatchAck {
+        o.handle(DispatchRequest(from: b, to: "worker", title: tab == nil ? "w" : nil, tab: tab, body: "ghi chú", card: card))
+    }
+    check(send(".agentteam/tasks/big.md").reason?.contains("quá dài") == true, "an oversized card is refused")
+    check(send(".agentteam/tasks/nope.md").reason?.contains("Không đọc được") == true, "a missing card says it cannot be read")
+    let first = send(".agentteam/tasks/ok.md")
+    let notes = first.chatId.map { send(nil, tab: $0) }
+    check(notes.map { ["queued", "started"].contains($0.disposition) } == true, "notes to an existing Executor chat need no new card (\(notes?.reason ?? ""))")
+
+    try? FileManager.default.removeItem(at: tmp)
+
+    let err = try await goalCase(verdict: "", criticError: true)
+    check(err.lead == 2 && err.chat?.messages.contains { $0.text.contains("Critic không kiểm tra được") } == true,
+          "a failing goal-check Critic leaves a note instead of waking the Lead (\(err.lead))")
+}
+
 try await scenario()
+try await minorFixesScenario()
 try await reviewFixesScenario()
 try await goalCheckScenario()
 try await failureRoutingScenario()
