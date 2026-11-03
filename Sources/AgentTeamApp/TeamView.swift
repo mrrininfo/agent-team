@@ -108,12 +108,8 @@ struct TeamView: View {
             .padding(.leading, 18)
         }
         HStack {
-            // Muse keeps its sign-in in a place it does not let us move per account; extra Muse accounts use API keys.
-            // Muse Web has neither: one muse.ai login copied from Chrome.
-            if p != .muse && p != .museWeb {
-                Button("+ Đăng nhập tài khoản khác") { openTerminal(p, login: true, account: accounts.add(Account(provider: p, label: "\(p.title) \(accounts.list.filter { $0.provider == p }.count + 2)", kind: .login), key: nil)) }
-            }
-            if p != .antigravity && p != .museWeb { Button("+ Thêm API key") { addingKey = p } }
+            Button("+ Đăng nhập tài khoản khác") { openTerminal(p, login: true, account: accounts.add(Account(provider: p, label: "\(p.title) \(accounts.list.filter { $0.provider == p }.count + 2)", kind: .login), key: nil)) }
+            if p != .antigravity { Button("+ Thêm API key") { addingKey = p } }
         }
         .buttonStyle(.link).font(.caption).padding(.leading, 18)
     }
@@ -542,7 +538,7 @@ final class Accounts {
 }
 
 
-/// New API-key account; for Claude Code it can point at another Anthropic-compatible service (e.g. Muse on Meta's Model API).
+/// New API-key account; for Claude Code it can point at another Anthropic-compatible service .
 struct AddKeySheet: View {
     let provider: Provider
     let onAdd: (Account, String) -> Void
@@ -555,16 +551,11 @@ struct AddKeySheet: View {
     var body: some View {
         Form {
             Text("Thêm API key cho \(provider.title)").font(.headline)
-            TextField("Tên hiển thị", text: $label, prompt: Text(provider == .claude ? "vd. Anthropic API, Muse" : provider == .muse ? "vd. Muse API (key bắt đầu bằng LLM_)" : "vd. OpenAI API"))
+            TextField("Tên hiển thị", text: $label, prompt: Text(provider == .claude ? "vd. Anthropic API" : "vd. OpenAI API"))
             SecureField("API key", text: $key)
             if provider == .claude {
-                TextField("Máy chủ (để trống = Anthropic)", text: $baseURL, prompt: Text("https://api.meta.ai"))
-                Button("Điền sẵn cho Muse (Meta Model API)") {
-                    baseURL = "https://api.meta.ai"
-                    if label.isEmpty { label = "Muse" }
-                }
-                .buttonStyle(.link)
-                Text("Có máy chủ riêng thì tài khoản không tự xoay vòng: chọn nó ở ô tài khoản của vị trí/fallback và điền model của dịch vụ đó (vd. muse-spark-1.2).")
+                TextField("Máy chủ (để trống = Anthropic)", text: $baseURL, prompt: Text("https://…"))
+                Text("Có máy chủ riêng thì tài khoản không tự xoay vòng: chọn nó ở ô tài khoản của vị trí/fallback và điền model của dịch vụ đó .")
                     .font(.caption).foregroundStyle(.secondary)
             }
             TextField("Token tối đa mỗi ngày", value: $cap, format: .number, prompt: Text("để trống = không giới hạn"))

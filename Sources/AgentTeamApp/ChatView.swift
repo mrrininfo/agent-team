@@ -397,7 +397,7 @@ struct ProfileEditor: View {
             }
             .labelsHidden().frame(width: 125)
             .disabled(profile.provider.efforts.count < 2)
-            // Accounts on another service (e.g. Muse) are only used when chosen here; the rest rotate on their own.
+            // Accounts on another service (a base URL) are only used when chosen here; the rest rotate on their own.
             let pinned = Accounts.shared.list.filter { $0.provider == profile.provider && !($0.baseURL ?? "").isEmpty }
             if !pinned.isEmpty || profile.account != nil {
                 Picker("", selection: $profile.account) {

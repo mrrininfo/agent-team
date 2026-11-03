@@ -9,7 +9,7 @@ public struct Account: Codable, Identifiable, Hashable, Sendable {
     public var provider: Provider
     public var label: String
     public var kind: Kind
-    /// API accounts only: another service speaking this provider's API (e.g. Meta's Model API for Muse through Claude Code).
+    /// API accounts only: another service speaking this provider's API (an Anthropic-compatible service through Claude Code).
     /// Its models differ from the provider's own, so it serves only profiles that name it and never joins the rotation.
     public var baseURL: String?
     /// API accounts only: tokens per day before the account is parked until midnight, so an unattended night cannot run up a bill.
@@ -82,10 +82,6 @@ public enum AccountStore {
             return env
         case .antigravity:
             return ["HOME": agyHome(d).path]
-        case .museWeb:
-            return [:]
-        case .muse:
-            return key.map { ["META_API_KEY": $0] } ?? [:]
         }
     }
 

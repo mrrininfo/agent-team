@@ -1208,8 +1208,8 @@ do {
     AccountStore.root = dir.appendingPathComponent("store")
     AccountStore.keyLookup = { $0 == "api1" ? "sk-test" : nil }
     let second = Account(id: "acct2", provider: .claude, label: "Claude 2", kind: .login)
-    let muse = Account(id: "api1", provider: .claude, label: "Muse", kind: .apiKey, baseURL: "https://api.meta.ai", dailyTokenCap: 100)
-    AccountStore.accounts = [second, muse]
+    let other = Account(id: "api1", provider: .claude, label: "Other API", kind: .apiKey, baseURL: "https://api.example.com", dailyTokenCap: 100)
+    AccountStore.accounts = [second, other]
     var used: [String?] = []
     let o = try Orchestrator(workspace: dir) { _, req, _, emit in
         used.append(req.profile.account)
@@ -1224,10 +1224,10 @@ do {
     o.send("viết test", to: c)
     for _ in 0..<300 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
     check(used == [nil, "acct2"] && o.chat(c)?.status == .done, "limited default account rotates to the second account of the same provider (\(used))")
-    check(!AccountStore.rotation(.claude).contains(muse), "an account on another service (base URL) never joins the rotation")
+    check(!AccountStore.rotation(.claude).contains(other), "an account on another service (base URL) never joins the rotation")
 
     let env = AccountStore.environment("api1")
-    check(env["ANTHROPIC_API_KEY"] == "sk-test" && env["ANTHROPIC_BASE_URL"] == "https://api.meta.ai" && env["CLAUDE_CONFIG_DIR"] != nil,
+    check(env["ANTHROPIC_API_KEY"] == "sk-test" && env["ANTHROPIC_BASE_URL"] == "https://api.example.com" && env["CLAUDE_CONFIG_DIR"] != nil,
           "API account runs Claude Code with its key, base URL and own config dir")
     check(AccountStore.environment(nil).isEmpty && AccountStore.environment("acct2")["CLAUDE_CONFIG_DIR"] != nil, "default account keeps the CLI's own login")
     check(!AccountStore.addUsage("api1", tokens: 60) && AccountStore.addUsage("api1", tokens: 50), "daily token cap trips once reached")
@@ -1632,105 +1632,6 @@ do {
           "a failing goal-check Critic leaves a note instead of waking the Lead (\(err.lead))")
 }
 
-do {
-    // Lines recorded from `muse exec --json` (1.4.14), trimmed to the fields the parser reads.
-    var mp = OutputParser(.muse)
-    let sid = "01a19fb1-4aa4-7440-bf5b-8a26eadd175e"
-    func line(_ type: String, _ payload: String) -> String {
-        #"{"schema_version":1,"stream":{"kind":"session","id":"\#(sid)"},"record_type":"event","payload_type":"\#(type)","payload":\#(payload)}"#
-    }
-    let started = mp.feed(line("run.lifecycle.started", #"{"kind":"run_started","prompt":"hi"}"#))
-    let delta = mp.feed(line("run.output.delta", #"{"text":"đang làm"}"#))
-    let usage = mp.feed(line("run.usage", #"{"models":[{"model":"muse-spark-1.3","input_tokens":120,"cached_tokens":20,"output_tokens":30,"reasoning_tokens":5,"calls":1}],"allowance":null}"#))
-    let done = mp.feed(line("run.terminal.completed", #"{"kind":"run_terminal","terminal":"completed","text":"echo: hello one","reason":null}"#))
-    let failed = mp.feed(line("run.terminal.failed", #"{"kind":"run_terminal","terminal":"failed","text":null,"reason":"allowance exhausted"}"#))
-    check(started.contains(.session(sid)) && delta.contains(.progress("đang làm")), "muse: session id and progress from events")
-    check(usage.contains(.usage(135)) && usage.contains(.modelMetadata("muse-spark-1.3")), "muse: usage counts uncached input + output + reasoning, and reports the model")
-    check(done.contains(.final("echo: hello one")) && failed.contains(.failure("allowance exhausted")), "muse: terminal events give the answer or the failure")
-    let args = Provider.muse.arguments(TurnRequest(prompt: "P", profile: Profile(.muse, "muse-spark-1.3", effort: "medium"), sessionId: sid, access: .readOnly))
-    check(args.starts(with: ["exec", "--json"]) && args.contains("--session-id") && args.contains("--disable-shell") && args.last == "P"
-          && args.contains("--reasoning-effort") && !Provider.muse.promptViaStdin, "muse: headless args, resume, read-only, effort, prompt as argument")
-    check(Provider.muse.parseStatus(exit: 1, output: "muse usage: not logged in: run `muse login` first").ok == false
-          && Provider.muse.parseStatus(exit: 0, output: "{}").ok == true, "muse: sign-in status from `muse usage --json`")
-    AccountStore.keyLookup = { _ in "LLM_test" }
-    AccountStore.accounts = [Account(id: "m1", provider: .muse, label: "Muse API", kind: .apiKey)]
-    check(AccountStore.environment("m1")["META_API_KEY"] == "LLM_test", "muse API account runs with META_API_KEY")
-    AccountStore.accounts = []
-}
-
-do {
-    let args = Provider.museWeb.arguments(TurnRequest(prompt: "P", profile: Profile(.museWeb), sessionId: "t1", access: .readOnly))
-    check(args == ["send", "P", "--thread", "t1", "--until-done", "--no-auto-approve"] && !Provider.museWeb.promptViaStdin,
-          "muse web: one blocking send into the chat's own thread, never auto-approving (\(args))")
-    check(Provider.museWeb.parseStatus(exit: 2, output: "auth error: no cookies file; run `muse-cli auth export`").ok == false
-          && Provider.museWeb.parseStatus(exit: 0, output: #"{"plan": "Free", "used_percent": 12}"#).detail.contains("12%"),
-          "muse web: sign-in status and plan use from `muse-cli usage --json`")
-    check(isSignedOutError("auth error: auth/check -> 401 (cookies expired? re-export)")
-          && isSignedOutError("Không tìm thấy lệnh `muse-cli`. Cài Muse Web CLI hoặc nhập đường dẫn trong tab Team."),
-          "expired muse.ai cookies or a missing CLI fail over like a sign-out")
-    let lite = TeamPreset.lite34.setup
-    for id in ["critic", "research"] {
-        check(lite.agents.first { $0.roleId == id }?.profile.provider == .museWeb
-              && lite.roles.first { $0.id == id }?.fallbacks.first?.provider != .museWeb,
-              "v3.4: \(id) runs on Muse Web with a local-model fallback")
-    }
-}
-
-// muse-cli: a new chat opens its own muse.ai thread first, then reads the one JSON object `send` prints at the end.
-@MainActor func museWebScenario() async throws {
-    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-museweb-\(shortId())")
-    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let log = dir.appendingPathComponent("calls.log").path
-    func script(_ name: String, _ send: String) throws -> String {
-        let f = dir.appendingPathComponent(name)
-        try """
-        #!/bin/sh
-        echo "$@" >> '\(log)'
-        if [ "$1" = session-start ]; then printf '{\\n  "session_id": "t9"\\n}\\n'; exit 0; fi
-        \(send)
-        """.write(to: f, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
-        return f.path
-    }
-    let ok = try script("ok", #"printf '{\n  "sent": true,\n  "outcome": "done",\n  "final_text": "xong\\nhai dòng"\n}\n'"#)
-    let ask = try script("ask", #"printf '{\n  "outcome": "needs_approval",\n  "approvals": [{"title": "Mở web", "question": "cho phép example.com?"}]\n}\n'; exit 4"#)
-    let runner = ProcessRunner(helperDir: nil)
-    var events: [RunEvent] = []
-    let req = TurnRequest(prompt: "hỏi", profile: Profile(.museWeb), sessionId: nil, access: .readOnly)
-    let e1 = await runner.run(chatId: "a", request: req, cwd: dir, binaryPath: ok) { events.append($0) }
-    let calls = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
-    check(e1 == nil && events.contains(.session("t9")) && events.contains(.final("xong\nhai dòng")),
-          "muse web: new thread then the final reply (\(e1 ?? "") \(events))")
-    check(calls.hasPrefix("session-start") && calls.contains("send hỏi --thread t9"), "muse web: send goes to the new thread (\(calls))")
-    try? FileManager.default.removeItem(atPath: log)
-    events = []
-    var resumed = req
-    resumed.sessionId = "t9"
-    let e2 = await runner.run(chatId: "b", request: resumed, cwd: dir, binaryPath: ask) { events.append($0) }
-    let calls2 = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
-    let failure = events.compactMap { if case .failure(let t) = $0 { t } else { nil } }.first ?? ""
-    check(!calls2.contains("session-start") && e2 != nil && failure.contains("example.com"),
-          "muse web: a resumed chat reuses its thread; a pending approval fails the turn with the question (\(failure))")
-
-    // The Lead learns which seats cannot read local files; those seats are told so too.
-    var prompts: [String: String] = [:]
-    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
-        prompts[req.profile.provider.rawValue] = req.prompt
-        emit(.final("ok"))
-        return nil
-    }
-    o.gitStatus = { _ in nil }
-    o.applySetup(TeamPreset.lite34.setup)
-    let lead = o.newChat(agentId: o.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
-    let critic = o.newChat(agentId: o.team.agents.first { $0.roleId == "critic" }!.id, title: "c")
-    o.send("Alo", to: lead)
-    o.send("Soi phương án này", to: critic)
-    for _ in 0..<400 where [lead, critic].contains(where: { o.chat($0)?.status != .done }) { try? await Task.sleep(nanoseconds: 5_000_000) }
-    check(prompts["codex"]?.contains("dán nguyên văn") == true, "Lead is told to paste content for Muse Web seats")
-    check(prompts["museWeb"]?.contains("không đọc được file") == true, "a Muse Web seat is told it cannot read local files")
-    try? FileManager.default.removeItem(at: dir)
-}
-
 // A provider that is not signed in hands the work to the role's fallback instead of failing the chat.
 @MainActor func signedOutScenario() async throws {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-signout-\(shortId())")
@@ -1738,31 +1639,30 @@ do {
     var used: [Provider] = []
     let o = try Orchestrator(workspace: dir) { _, req, _, emit in
         used.append(req.profile.provider)
-        if req.profile.provider == .muse {
-            return "exit 1: missing meta credentials: run `muse login` or set META_API_KEY, or save credentials at /Users/x/.config/muse/auth.json"
+        if req.profile.provider == .codex {
+            return "exit 1: Not logged in. Please run `codex login`."
         }
         emit(.final("ok"))
         return nil
     }
     o.gitStatus = { _ in nil }
     let li = o.team.agents.firstIndex { $0.roleId == "lead" }!
-    o.team.agents[li].profile = Profile(.muse, "muse-spark-1.3")
+    o.team.agents[li].profile = Profile(.codex, "gpt-6.1-sol")
     let ri = o.team.roles.firstIndex { $0.id == "lead" }!
     o.team.roles[ri].fallbacks = [Profile(.claude, "opus")]
     let c = o.newChat(agentId: o.team.agents[li].id, title: "l")
     o.send("Alo", to: c)
     for _ in 0..<400 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
-    check(used == [.muse, .claude] && o.chat(c)?.status == .done && o.team.limitedProviders.contains(.muse),
+    check(used == [.codex, .claude] && o.chat(c)?.status == .done && o.team.limitedProviders.contains(.codex),
           "signed-out provider fails over to the fallback (\(used))")
     check(o.chat(c)?.messages.contains { $0.text.contains("chưa đăng nhập") } == true, "the chat says the provider is signed out")
-    check(isSignedOutError("Muse Code requires a payment method — subscribe at https://accountscenter.meta.com/x, then log in again.")
+    check(isSignedOutError("Không tìm thấy lệnh `codex`. Cài Codex CLI hoặc nhập đường dẫn trong tab Team.")
           && !isSignedOutError("tests failed"), "sign-out messages are recognised")
     try? FileManager.default.removeItem(at: dir)
 }
 
 try await scenario()
 try await signedOutScenario()
-try await museWebScenario()
 try await minorFixesScenario()
 try await reviewFixesScenario()
 try await goalCheckScenario()

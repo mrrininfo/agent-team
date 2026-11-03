@@ -1,9 +1,7 @@
 import Foundation
 
 public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
-    /// museWeb: the muse.ai personal agent through the unofficial `muse-cli` (browser cookies). It runs on Meta's VM,
-    /// so it never sees the workspace: only for seats that judge text pasted into the prompt (Critic, Research).
-    case claude, codex, antigravity, muse, museWeb
+    case claude, codex, antigravity
 
     public var id: String { rawValue }
 
@@ -12,8 +10,6 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .claude: "Claude Code"
         case .codex: "Codex"
         case .antigravity: "Antigravity"
-        case .muse: "Muse"
-        case .museWeb: "Muse Web"
         }
     }
 
@@ -22,8 +18,6 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .claude: "claude"
         case .codex: "codex"
         case .antigravity: "agy"
-        case .muse: "muse"
-        case .museWeb: "muse-cli"
         }
     }
 
@@ -34,8 +28,6 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .codex: ["gpt-6.1-sol", "gpt-6-luna"]
         case .antigravity: ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-medium",
                              "claude-opus-5-5-high", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "gpt-oss-120b-medium"]
-        case .muse: ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]
-        case .museWeb: []
         }
     }
 
@@ -43,9 +35,8 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Antigravity encodes effort in the model slug (e.g. gemini-3.8-flash-high).
     public var efforts: [String] {
         switch self {
-        case .claude, .antigravity, .museWeb: [""]
+        case .claude, .antigravity: [""]
         case .codex: ["", "low", "medium", "high"]
-        case .muse: ["", "low", "medium", "high", "xhigh", "max"]
         }
     }
 }
@@ -610,7 +601,6 @@ public enum TeamPreset: String, CaseIterable, Identifiable, Sendable {
                 Được tạo file khung/stub (chữ ký, kiểu, TODO) nhưng KHÔNG viết phần ruột. Ưu tiên cách đơn giản nhất đủ đáp ứng đề bài.
                 Việc phân tích/đề xuất: 1-3 phương án kèm đánh đổi, giả định, rủi ro, cách kiểm chứng, khuyến nghị.
                 Nhận báo lỗi SPEC_GAP: sửa thẻ việc hoặc khung cho đúng, báo ngắn đã đổi gì.
-                Bị phản biện (debate): câu trả lời chứa nguyên văn thẻ việc/phương án, vì Critic có thể không đọc được file.
                 """, access: .write,
                 fallbacks: [Profile(.codex, "gpt-6.1-sol", effort: "high"), Profile(.antigravity, "claude-opus-5-5-high")]),
             Role(id: "critic", name: "Critic", contract: """
@@ -619,7 +609,7 @@ public enum TeamPreset: String, CaseIterable, Identifiable, Sendable {
                 Kiểm tra đáp án cuối: chấm từng tiêu chí của đề bài (đạt/không, vì sao), xem câu trả lời có đúng trọng tâm câu hỏi gốc,
                 kết thúc bằng KẾT LUẬN: ĐẠT hoặc KẾT LUẬN: KHÔNG ĐẠT. Không sửa file dự án.
                 """, access: .readOnly,
-                fallbacks: [Profile(.codex, "gpt-6.1-sol", effort: "medium"), Profile(.antigravity, "gemini-4-argon-medium"), Profile(.claude, "sonnet")]),
+                fallbacks: [Profile(.antigravity, "gemini-4-argon-medium"), Profile(.claude, "sonnet")]),
             Role(id: "worker", name: "Executor", contract: """
                 Làm đúng thẻ việc được giao. Chỉ sửa file trong mục "File được sửa"; giữ nguyên chữ ký trong "Khung code";
                 không sửa hay xoá test. Chạy lệnh trong "Test nghiệm thu" trước khi báo; chỉ báo xong khi đã pass.
@@ -639,15 +629,14 @@ public enum TeamPreset: String, CaseIterable, Identifiable, Sendable {
                 Tìm hiểu và tổng hợp: đọc tài liệu, mã nguồn, dữ liệu được chỉ định; trả lời đúng câu hỏi được giao kèm nguồn
                 (đường dẫn, file:line, link). Tách rõ điều đã kiểm chứng và điều suy đoán. Không sửa file dự án.
                 """, access: .readOnly,
-                fallbacks: [Profile(.antigravity, "gemini-3.8-flash-high"), Profile(.antigravity, "gemini-3.8-flash-medium"), Profile(.claude, "haiku")]),
+                fallbacks: [Profile(.antigravity, "gemini-3.8-flash-medium"), Profile(.claude, "haiku")]),
         ], agents: [
             Agent(roleId: "lead", profile: Profile(.codex, "gpt-6.1-sol", effort: "medium")),
             Agent(roleId: "planner", profile: Profile(.claude, "opus")),
-            // Muse Web (muse.ai plan, no per-token bill) takes the seats that only judge text; each falls back to a local model.
-            Agent(roleId: "critic", profile: Profile(.museWeb)),
+            Agent(roleId: "critic", profile: Profile(.codex, "gpt-6.1-sol", effort: "medium")),
             Agent(roleId: "worker", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
             Agent(roleId: "testing", profile: Profile(.claude, "sonnet")),
-            Agent(roleId: "research", profile: Profile(.museWeb)),
+            Agent(roleId: "research", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
         ])
     }
 

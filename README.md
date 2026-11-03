@@ -59,12 +59,7 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
 
 15. **Nhiều tài khoản / API key**: Team & Provider → "+ Đăng nhập tài khoản khác" hoặc "+ Thêm API key". Tài khoản mặc định hết
     limit thì tự dùng tài khoản kế tiếp cùng provider rồi mới tới fallback. API key nằm trong Keychain, có giới hạn token/ngày.
-    Muse: provider riêng (cài Muse Code: `curl -fsSL https://dev.meta.ai/install.sh | bash`, rồi bấm Login ở dòng Muse),
-    hoặc API key `LLM_…` cho dòng Muse, hoặc API key cho Claude Code với máy chủ `https://api.meta.ai`.
-    Muse Web: gói muse.ai (không cần thẻ) qua `muse-cli` không chính thức (github.com/thoitiettxl-cyber/muse-cli,
-    `uv tool install git+https://github.com/thoitiettxl-cyber/muse-cli.git`), rồi bấm Login ở dòng Muse Web để chép đăng nhập
-    muse.ai từ Chrome. Chạy trên máy ảo của Meta, không đọc được file dự án: bộ v3.4 chỉ dùng cho Critic và Research,
-    có model dự phòng; không tự duyệt yêu cầu của Muse. Dựa vào API web nội bộ nên có thể gãy hoặc trái điều khoản muse.ai.
+    API key cho Claude Code có thể trỏ tới máy chủ tương thích Anthropic khác; chọn tài khoản đó ở vị trí cần dùng.
 16. **Tab dự án, Tìm (⌘F), nói thay gõ**: dự án mở thành tab; 🔍 tìm từ khoá trong mọi chat; 🎙 dùng Đọc chính tả của macOS.
 
 ## Tiết kiệm token
