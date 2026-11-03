@@ -37,16 +37,17 @@ struct ChatView: View {
                 Divider()
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 12) {
-                            // Only the tail is laid out: a long chat (Lead reaches 150+ replies) made each update re-measure
-                            // every row, freezing the UI for over a minute and growing RAM by ~0.6 GB.
+                        // Not Lazy: with rows of very different heights LazyVStack kept inserting and removing rows inside one
+                        // update and never finished, so the main thread spun at 100% (sampled hang, 2026-11-03). Only the tail
+                        // is shown, so laying out every row is cheap: a long chat (Lead reaches 150+ replies) froze the UI before.
+                        VStack(alignment: .leading, spacing: 12) {
                             if c.messages.count > shown {
                                 Button("Hiện \(min(Self.page, c.messages.count - shown)) tin cũ hơn (còn \(c.messages.count - shown))") {
                                     shown += Self.page
                                 }
                                 .buttonStyle(.link).font(.caption)
                             }
-                            ForEach(c.messages.suffix(shown)) { MessageRow(m: $0, root: o.paths.workspace, highlighted: $0.id == focus) }
+                            ForEach(c.messages.suffix(shown)) { MessageRow(m: $0, root: o.paths.workspace, highlighted: $0.id == focus).equatable() }
                             if !c.activity.isEmpty {
                                 HStack(spacing: 8) {
                                     ProgressView().controlSize(.small)
@@ -289,7 +290,8 @@ struct ChatView: View {
     }
 }
 
-struct MessageRow: View {
+/// Equatable so the once-a-second progress updates do not re-parse every message's markdown.
+struct MessageRow: View, Equatable {
     let m: Message
     let root: URL
     var highlighted = false
