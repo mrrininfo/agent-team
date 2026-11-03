@@ -286,6 +286,7 @@ public final class Orchestrator {
     public func send(_ text: String, to chatId: String) {
         if let c = chat(chatId), team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.canDispatch == true {
             Brief.record(text, at: Date(), file: paths.briefFile(chatId))
+            update(chatId) { $0.goalChecked = nil }
         }
         update(chatId) {
             $0.autoTurns = 0
@@ -299,6 +300,23 @@ public final class Orchestrator {
     /// "Việc mới": the current request is archived; the next message starts a new brief.
     public func closeBrief(_ chatId: String) {
         Brief.close(paths.briefFile(chatId), doneDir: paths.briefsDone)
+        update(chatId) { $0.briefDispatched = nil; $0.goalChecked = nil }
+    }
+
+    /// Once the Lead answers a brief it dispatched work for and nothing it started is still running, the Critic checks
+    /// the answer against the brief, once. Skipped when off, without a usable Critic, or without a brief.
+    func startGoalCheck(_ leadId: String, answer: String) {
+        guard team.goalCheckOn, let c = chat(leadId), c.briefDispatched == true, c.goalChecked != true, c.pending.isEmpty,
+              team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.canDispatch == true,
+              !chats.contains(where: { $0.replyTo == leadId && [.running, .queued].contains($0.status) }),
+              let critic = team.agents.first(where: { $0.roleId == "critic" }), team.effectiveProfile(for: critic) != nil,
+              let brief = Brief.block(paths.briefFile(leadId)) else { return }
+        update(leadId) { $0.goalChecked = true }
+        let id = newChat(agentId: critic.id, title: "Kiểm tra đề bài: " + c.title, replyTo: leadId)
+        update(id) { $0.goalCheckFor = leadId }
+        enqueue(id, "[Kiểm tra đáp án cuối của Lead]\n\(brief)\n## Đáp án của Lead\n\(answer)\n\n"
+            + "Chấm từng tiêu chí (đạt/không, vì sao) và xem đáp án có đúng trọng tâm câu hỏi gốc không. "
+            + "Kết thúc bằng KẾT LUẬN: ĐẠT hoặc KẾT LUẬN: KHÔNG ĐẠT.", kind: .task)
     }
 
     /// The pinned request of a dispatching chat, nil for other roles or when none is open.
@@ -711,9 +729,18 @@ public final class Orchestrator {
                 $0.inFlight = []
                 $0.status = $0.pending.isEmpty ? .done : .queued
             }
-            if delegated && !relayStep(c, final: final) {
+            if let lead = c.goalCheckFor {
+                // A pass only notes it in the Lead's chat; a fail wakes the Lead once to fix its answer.
+                if Relay.passed(final, mode: .verify) {
+                    update(lead) { $0.messages.append(Message(.system, "✓ Critic: đáp án khớp đề bài.")) }
+                } else {
+                    callback(from: c, status: "đáp án cuối KHÔNG ĐẠT so với đề bài — sửa đáp án theo nhận xét; không kiểm tra lại",
+                             text: final, turnProfile: profile, turnModel: turnReportedModel)
+                }
+            } else if delegated && !relayStep(c, final: final) {
                 callback(from: c, status: "xong", text: final, turnProfile: profile, turnModel: turnReportedModel)
             }
+            startGoalCheck(chatId, answer: final)
             scheduleCompact(chatId, profile: profile)
             if team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.access == .write { refreshGraph() }
         } else if let error, isLimitError(error) {
@@ -1365,6 +1392,7 @@ public final class Orchestrator {
             chats.append(updatedDiskChat)
         }
         dispatchCount[r.from, default: 0] += 1
+        if FileManager.default.fileExists(atPath: paths.briefFile(r.from).path) { update(r.from) { $0.briefDispatched = true } }
 
         let disposition = updatedDiskChat.status == .running ? "started" : "queued"
         let ack = DispatchAck(id: r.id, disposition: disposition, chatId: targetId, fingerprint: fp)

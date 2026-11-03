@@ -345,6 +345,8 @@ struct TeamView: View {
             Stepper(o.team.compactAt == 0 ? "Tự nén context: tắt" : "Tự nén context khi vượt: \(o.team.compactAt)% cửa sổ model",
                     value: Binding(get: { o.team.compactAt }, set: { o.team.compactPercent = $0 }), in: 0...90, step: 10)
                 .help("Chỉ chạy giữa các lượt, không ngắt việc đang chạy. Claude: chạy /compact ngầm khi chat rảnh. Codex: tự nén khi chạm ngưỡng. Antigravity không có lệnh nén: lượt sau mở phiên mới kèm gói bàn giao. 0 = tắt.")
+            Toggle("Critic kiểm tra đáp án cuối của Lead khớp đề bài", isOn: Binding(get: { o.team.goalCheckOn }, set: { o.team.goalCheck = $0 }))
+                .help("Khi Lead trả lời xong một đề bài có giao việc, Critic chấm từng tiêu chí. Đạt: chỉ ghi chú, không tốn lượt Lead. Không đạt: Lead sửa đáp án một lần. Tốn thêm 1 lượt Critic mỗi đáp án cuối.")
         }
     }
 }

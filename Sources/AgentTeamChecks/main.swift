@@ -451,6 +451,7 @@ try FileManager.default.createDirectory(at: ws, withIntermediateDirectories: tru
     }
     o.gitStatus = { _ in nil }
     o.team = Team.starter()  // independent of a template the user saved
+    o.team.goalCheck = false  // this scenario asserts exact prompt order; goalCheckScenario covers the extra Critic turn
     let li = o.team.agents.firstIndex { $0.roleId == "lead" }!
     o.team.agents[li].profile = Profile(.claude, "opus")
     let lead = o.team.agents[li]
@@ -1409,7 +1410,67 @@ do {
           "the last classification line wins")
 }
 
+// After the Lead's final answer on a dispatched brief, the Critic checks it once against the brief.
+@MainActor func goalCase(verdict: String, enabled: Bool = true, removeCritic: Bool = false, dispatch: Bool = true) async throws
+    -> (lead: Int, critic: Int, chat: Chat?) {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-goal-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    final class Box { var o: Orchestrator?; var lead = "" }
+    let box = Box()
+    var leadTurns = 0, criticTurns = 0
+    let o = try Orchestrator(workspace: dir) { chatId, _, _, emit in
+        guard let o = box.o, let role = o.chat(chatId).flatMap({ o.team.agent($0.agentId) })?.roleId else { return nil }
+        switch role {
+        case "lead":
+            leadTurns += 1
+            if leadTurns == 1 && dispatch {
+                _ = o.handle(DispatchRequest(from: box.lead, to: "research", title: "r", tab: nil, body: "tìm hiểu"))
+                emit(.final("đã giao"))
+            } else {
+                emit(.final("Câu hỏi: X? Đáp án \(leadTurns)"))
+            }
+        case "critic":
+            criticTurns += 1
+            emit(.final(verdict))
+        default:
+            emit(.final("kết quả \(role)"))
+        }
+        return nil
+    }
+    box.o = o
+    o.gitStatus = { _ in nil }
+    o.applySetup(TeamPreset.lite34.setup)
+    for i in o.team.agents.indices { o.team.agents[i].profile = Profile(.claude, "sonnet") }
+    o.team.roles = o.team.roles.map { var r = $0; r.fallbacks = []; return r }
+    o.team.goalCheck = enabled
+    if removeCritic { o.team.agents.removeAll { $0.roleId == "critic" } }
+    box.lead = o.newChat(agentId: o.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
+    o.send("Câu hỏi X?", to: box.lead)
+    for _ in 0..<800 {
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        if !o.chats.contains(where: { [.running, .queued].contains($0.status) }) && leadTurns > 0 { break }
+    }
+    let c = o.chat(box.lead)
+    try? FileManager.default.removeItem(at: dir)
+    return (leadTurns, criticTurns, c)
+}
+
+@MainActor func goalCheckScenario() async throws {
+    let pass = try await goalCase(verdict: "Tiêu chí 1 đạt\nKẾT LUẬN: ĐẠT")
+    check(pass.lead == 2 && pass.critic == 1 && pass.chat?.messages.contains { $0.text.contains("khớp đề bài") } == true,
+          "a passing goal check costs no extra Lead turn (\(pass.lead), \(pass.critic))")
+    let fail = try await goalCase(verdict: "Lạc đề\nKẾT LUẬN: KHÔNG ĐẠT")
+    check(fail.lead == 3 && fail.critic == 1, "a failing goal check gives the Lead exactly one more turn, no second check (\(fail.lead), \(fail.critic))")
+    let off = try await goalCase(verdict: "KẾT LUẬN: ĐẠT", enabled: false)
+    check(off.critic == 0 && off.lead == 2, "goal check can be turned off")
+    let noCritic = try await goalCase(verdict: "KẾT LUẬN: ĐẠT", removeCritic: true)
+    check(noCritic.critic == 0 && noCritic.chat?.status == .done, "without a Critic the Lead finishes normally")
+    let direct = try await goalCase(verdict: "KẾT LUẬN: ĐẠT", dispatch: false)
+    check(direct.critic == 0 && direct.lead == 1, "an answer with no dispatched work is not checked")
+}
+
 try await scenario()
+try await goalCheckScenario()
 try await failureRoutingScenario()
 try await taskCardScenario()
 try await briefScenario()
