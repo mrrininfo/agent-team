@@ -1248,7 +1248,68 @@ do {
     try? FileManager.default.removeItem(at: dir)
 }
 
+// The user's request to the Lead stays in every Lead turn, even resumed ones, and in hand-off packages.
+@MainActor func briefScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-brief-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var prompts: [String] = []
+    var slow = false
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        prompts.append(req.prompt)
+        emit(.session("s1"))
+        if slow { try? await Task.sleep(nanoseconds: 50_000_000) }
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    let lead = o.team.agents.first { $0.roleId == "lead" }!
+    let c = o.newChat(agentId: lead.id, title: "l")
+    func idle() async { for _ in 0..<300 where o.chat(c)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) } }
+    o.send("Câu hỏi gốc ABC", to: c)
+    await idle()
+    o.send("Thêm XYZ", to: c)
+    await idle()
+    check(prompts.count == 2 && prompts[1].contains("ĐỀ BÀI ĐANG LÀM") && prompts[1].contains("Câu hỏi gốc ABC"),
+          "resumed Lead turn still carries the pinned request")
+    check(prompts.count == 2 && !prompts[1].contains("HỢP ĐỒNG VAI TRÒ"), "resumed Lead turn still skips the role contract")
+
+    slow = true
+    o.send("tin một", to: c)
+    for _ in 0..<200 where o.chat(c)?.status != .running { try? await Task.sleep(nanoseconds: 2_000_000) }
+    o.send("Tin lúc đang chạy QQQ", to: c)
+    await idle()
+    let file = o.paths.briefFile(c)
+    check((try? String(contentsOf: file, encoding: .utf8))?.contains("Tin lúc đang chạy QQQ") == true, "a message sent while the Lead runs is pinned too")
+
+    let worker = o.team.agents.first { $0.roleId == "worker" }!
+    let w = o.newChat(agentId: worker.id, title: "w")
+    o.send("việc", to: w)
+    for _ in 0..<300 where o.chat(w)?.status != .done { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(!FileManager.default.fileExists(atPath: o.paths.briefFile(w).path), "non-dispatching roles get no brief")
+
+    let big = dir.appendingPathComponent("big.md")
+    Brief.record("FIRST-REQUEST", at: Date(), file: big)
+    for i in 0..<10 { Brief.record("req\(i) " + String(repeating: "x", count: 2000), at: Date(), file: big) }
+    Brief.record("LAST-REQUEST", at: Date(), file: big)
+    let b = Brief.block(big)
+    check(b != nil && b!.count <= 3000 && b!.contains("FIRST-REQUEST") && b!.contains("LAST-REQUEST"), "long brief is clipped but keeps first and last request")
+
+    o.closeBrief(c)
+    let done = (try? FileManager.default.contentsOfDirectory(atPath: o.paths.briefsDone.path)) ?? []
+    check(!FileManager.default.fileExists(atPath: file.path) && done.count == 1, "closing a brief moves it to briefs/done")
+    let before = prompts.count
+    o.send("việc mới", to: c)
+    await idle()
+    check(prompts.count == before + 1 && prompts.last?.contains("việc mới") == true && prompts.last?.contains("Câu hỏi gốc ABC") == false,
+          "after closing, the old request is no longer pinned")
+
+    let pkg = Handoff.package(chat: Chat(agentId: "x", title: "t"), role: nil, reason: "r", inputs: [], notes: nil, gitStatus: nil, brief: "B")
+    check(pkg.contains("## Nhiệm vụ gốc\nB"), "hand-off package uses the brief as the original task")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 try await scenario()
+try await briefScenario()
 try await accountRotationScenario()
 try await eventBurstScenario()
 try await stuckAgySessionScenario()

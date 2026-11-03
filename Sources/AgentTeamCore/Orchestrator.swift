@@ -282,6 +282,9 @@ public final class Orchestrator {
     }
 
     public func send(_ text: String, to chatId: String) {
+        if let c = chat(chatId), team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.canDispatch == true {
+            Brief.record(text, at: Date(), file: paths.briefFile(chatId))
+        }
         update(chatId) {
             $0.autoTurns = 0
             if $0.title == Chat.untitled { $0.title = Chat.title(from: text) }
@@ -290,6 +293,17 @@ public final class Orchestrator {
     }
 
     public func rename(_ chatId: String, _ title: String) { update(chatId) { $0.title = title } }
+
+    /// "Việc mới": the current request is archived; the next message starts a new brief.
+    public func closeBrief(_ chatId: String) {
+        Brief.close(paths.briefFile(chatId), doneDir: paths.briefsDone)
+    }
+
+    /// The pinned request of a dispatching chat, nil for other roles or when none is open.
+    func briefBlock(_ c: Chat) -> String? {
+        guard team.agent(c.agentId).flatMap({ team.role($0.roleId) })?.canDispatch == true else { return nil }
+        return Brief.block(paths.briefFile(c.id))
+    }
 
     public var totalTokens: Int { chats.reduce(0) { $0 + $1.tokens } }
 
@@ -351,7 +365,7 @@ public final class Orchestrator {
     public func transfer(from: String, to: String, reason: String = "chuyển giao thủ công") {
         guard let s = chat(from), from != to else { return }
         let pkg = Handoff.package(chat: s, role: team.agent(s.agentId).flatMap { team.role($0.roleId) }, reason: reason,
-                                  inputs: s.inFlight + s.pending, notes: notes(from), gitStatus: gitStatus(paths.workspace))
+                                  inputs: s.inFlight + s.pending, notes: notes(from), gitStatus: gitStatus(paths.workspace), brief: briefBlock(s))
         if s.status == .running { stop(from) }
         update(from) {
             $0.pending = []
@@ -451,6 +465,13 @@ public final class Orchestrator {
               - Làm + nghiệm thu: thêm `--verify testing` (vd. `--to worker --verify testing`). Testing KHÔNG ĐẠT thì app tự gửi lại
                 worker sửa (tối đa 3 vòng, đổi bằng `--rounds N`); bạn chỉ nhận kết luận cuối.
 
+            ## Đề bài
+            - App ghi nguyên văn mọi tin người dùng gửi bạn vào `\(paths.briefFile(chat.id).path)` và gắn đề bài lên đầu mỗi lượt.
+            - Lượt đầu của một việc mới: viết mục "Tiêu chí xong" (mỗi tiêu chí một dòng, kiểm chứng được) và "Ngoài phạm vi" trong file đó;
+              người dùng đổi ý thì sửa lại.
+            - Đáp án cuối gửi người dùng: mở đầu bằng `Câu hỏi: <nguyên văn câu hỏi>`, rồi trả lời theo từng tiêu chí.
+            - Xong hẳn việc (người dùng đã nhận đáp án cuối) thì chạy `agentteam brief done`.
+
             ## Thảo luận
             - Số vòng phản biện planner ↔ critic tối đa: \(team.debateRounds ?? 2) (con số này thay cho số vòng ghi trong hợp đồng; người dùng ghi số khác thì theo người dùng).
             """
@@ -521,9 +542,10 @@ public final class Orchestrator {
         // R1: Hand off full context even if the first turn failed on limit
         if !resumable && (c.messages.contains(where: { $0.kind == .assistant || $0.kind == .system }) || c.sessionId != nil) {
             body = Handoff.package(chat: c, role: role, reason: "tiếp tục trên \(profile.label)",
-                                   inputs: inputs, notes: notes(chatId), gitStatus: gitStatus(paths.workspace))
+                                   inputs: inputs, notes: notes(chatId), gitStatus: gitStatus(paths.workspace), brief: briefBlock(c))
         }
-        let prompt = (resumable ? "" : preamble(c, agent, role)) + body
+        // The brief goes on top of every turn, resumed ones too: a long session forgets the request after compaction.
+        let prompt = (resumable ? "" : preamble(c, agent, role)) + (briefBlock(c) ?? "") + body
 
         // R1: Validate argv size before setting inFlight. If exceeded, keep in pending and report error.
         if profile.provider == .antigravity && prompt.utf8.count > Provider.maxAntigravityPromptBytes {

@@ -2,13 +2,16 @@ import Foundation
 
 /// Builds the context a fresh session needs to take over a chat. Pure: no model call, no tokens spent.
 public enum Handoff {
-    public static func package(chat: Chat, role: Role?, reason: String, inputs: [Input], notes: String?, gitStatus: String?) -> String {
+    public static func package(chat: Chat, role: Role?, reason: String, inputs: [Input], notes: String?, gitStatus: String?, brief: String? = nil) -> String {
         var s = """
         # BÀN GIAO CÔNG VIỆC (Agent Team)
         Bạn tiếp quản công việc dang dở của vai trò \(role?.name ?? "?") (chat \(chat.id) · "\(chat.title)"). Lý do: \(reason).
         Không làm lại phần đã xong; kiểm tra trạng thái file thực tế trước khi sửa. Tiếp tục đúng điểm bị ngắt rồi báo cáo theo hợp đồng vai trò.
         """
-        if let first = chat.messages.first(where: { [.user, .task, .handoff].contains($0.kind) }) {
+        // A dispatcher's pinned brief beats its chat's first message, which in a long-lived Lead chat is an old request.
+        if let brief {
+            s += "\n\n## Nhiệm vụ gốc\n" + brief
+        } else if let first = chat.messages.first(where: { [.user, .task, .handoff].contains($0.kind) }) {
             s += "\n\n## Nhiệm vụ gốc\n" + first.text
         }
         let open = inputs.map(\.text).filter { $0 != chat.messages.first?.text }

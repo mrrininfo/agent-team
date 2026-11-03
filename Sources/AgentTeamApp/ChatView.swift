@@ -16,6 +16,8 @@ struct ChatView: View {
     @State private var dropTargeted = false
     @State private var shown = ChatView.page
     @FocusState private var composerFocused: Bool
+    /// Bumped after "Việc mới" so the header re-reads whether a brief file exists.
+    @State private var briefTick = 0
     static let page = 30
     @State private var pasteMonitor: Any?
 
@@ -98,6 +100,13 @@ struct ChatView: View {
                     .textFieldStyle(.plain).font(.title3.bold())
                 Spacer()
                 Label(c.status.title, systemImage: "circle.fill").foregroundStyle(c.status.color).font(.caption)
+                let briefFile = o.paths.briefFile(chatId)
+                if briefTick >= 0, o.team.role(agent.roleId)?.canDispatch == true, FileManager.default.fileExists(atPath: briefFile.path) {
+                    Button("Đề bài") { preview.open(briefFile) }
+                        .help("Xem đề bài đang ghim: yêu cầu nguyên văn của bạn và tiêu chí xong do Lead viết")
+                    Button("Việc mới") { o.closeBrief(chatId); briefTick += 1 }
+                        .help("Đóng đề bài hiện tại (lưu vào .agentteam/briefs/done); tin nhắn kế tiếp bắt đầu đề bài mới")
+                }
                 if c.status == .running || c.status == .queued {
                     Button("Dừng") { o.stop(chatId) }
                 }

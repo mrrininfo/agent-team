@@ -8,6 +8,7 @@ agentteam — giao việc giữa các agent trong Agent Team
   agentteam dispatch [--from <chatId>] --to <agentId|role> (--new-task "<tiêu đề>" | --tab <chatId>)
                      [--debate <role> | --verify <role>] [--rounds N] "<nội dung>" | -
   agentteam show <chatId>          # trả lời cuối của một chat
+  agentteam brief done             # đóng đề bài đang làm của chat này (việc đã xong)
   agentteam status <handoffId>     # ACK của một lần giao
 
 --from mặc định lấy từ biến AGENTTEAM_CHAT. Nội dung "-" đọc từ stdin.
@@ -89,6 +90,13 @@ case "dispatch":
         Thread.sleep(forTimeInterval: 0.25)
     }
     print("handoffId: \(req.id)\ndisposition: pending (app chưa xác nhận; kiểm tra: agentteam status \(req.id))")
+
+case "brief":
+    guard args.first == "done" else { fail(usage) }
+    args.removeFirst()
+    guard let chatId = option("--from") ?? env["AGENTTEAM_CHAT"] else { fail("Thiếu --from <chatId>.") }
+    Brief.close(paths.briefFile(chatId), doneDir: paths.briefsDone)
+    print("đã đóng đề bài của chat \(chatId)")
 
 case "status":
     guard let id = args.first else { fail(usage) }

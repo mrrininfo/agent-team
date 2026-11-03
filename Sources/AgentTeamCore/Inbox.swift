@@ -74,6 +74,9 @@ public struct TeamPaths: Sendable {
 
     public func chatFile(_ id: String) -> URL { chats.appendingPathComponent("\(id).json") }
     public func noteFile(_ id: String) -> URL { notes.appendingPathComponent("\(id).md") }
+    /// The request a dispatching chat is working on (see `Brief`).
+    public func briefFile(_ id: String) -> URL { root.appendingPathComponent("briefs/\(id).md") }
+    public var briefsDone: URL { root.appendingPathComponent("briefs/done", isDirectory: true) }
     public func ackFile(_ id: String) -> URL { acks.appendingPathComponent("\(id).json") }
 
     public func ensureLockDirectory() throws {
