@@ -79,14 +79,18 @@ public struct Role: Codable, Identifiable, Hashable, Sendable {
     public var canDispatch: Bool
     /// Tried in order after the agent's own profile when its provider is disabled or limited.
     public var fallbacks: [Profile]
+    /// Work for this role must come with a task card (`--card`): a weaker coding model needs the skeleton spelled out.
+    public var requiresCard: Bool?
 
-    public init(id: String, name: String, contract: String, access: Access, canDispatch: Bool = false, fallbacks: [Profile] = []) {
+    public init(id: String, name: String, contract: String, access: Access, canDispatch: Bool = false, fallbacks: [Profile] = [],
+                requiresCard: Bool? = nil) {
         self.id = id
         self.name = name
         self.contract = contract
         self.access = access
         self.canDispatch = canDispatch
         self.fallbacks = fallbacks
+        self.requiresCard = requiresCard
     }
 }
 
@@ -464,12 +468,13 @@ public struct TeamSetup: Codable, Hashable, Sendable {
 }
 
 public enum TeamPreset: String, CaseIterable, Identifiable, Sendable {
-    case standard, design, assistant
+    case standard, lite34, design, assistant
     public var id: String { rawValue }
 
     public var title: String {
         switch self {
         case .standard: "Mặc định"
+        case .lite34: "v3.4 rút gọn"
         case .design: "Design"
         case .assistant: "Assistant"
         }
@@ -478,6 +483,7 @@ public enum TeamPreset: String, CaseIterable, Identifiable, Sendable {
     public var setup: TeamSetup {
         switch self {
         case .standard: Team.starter().setup
+        case .lite34: Self.lite34Setup
         case .design: Self.designSetup
         case .assistant: Self.assistantSetup
         }
@@ -533,6 +539,68 @@ public enum TeamPreset: String, CaseIterable, Identifiable, Sendable {
     }
 
     /// Chatbot-style Q&A: the lead answers itself; research and checking only when needed.
+    /// Brief → task card with a code skeleton → build → classified verification → goal check.
+    /// Architect (strongest model) writes the skeleton so the fast Executor only fills it in; Critic stays on another family.
+    static var lite34Setup: TeamSetup {
+        TeamSetup(roles: [
+            Role(id: "lead", name: "Lead", contract: """
+                Điều phối và chốt đáp án cuối. Không tự làm phần việc của vai trò khác. Luôn bám đề bài đang ghim.
+                Việc code đi đúng luồng:
+                1. Giao architect viết thẻ việc (+ khung code) cho từng phần nhỏ (tối đa 3 file, khoảng 300 dòng); việc lớn/rủi ro thì kèm
+                   `--debate critic`.
+                2. Giao testing viết test nghiệm thu thất bại trước, theo mục "Test nghiệm thu" của thẻ.
+                3. Giao worker: `--to worker --card .agentteam/tasks/<id>.md --verify testing`. App tự định tuyến khi KHÔNG ĐẠT:
+                   lỗi spec về architect, lỗi test về testing, lỗi code về worker; dừng sớm khi không tiến triển.
+                Việc tìm hiểu/tổng hợp tài liệu, dữ liệu: giao research (chỉ khi cần).
+                Quyết định quan trọng ghi vào .agentteam/decisions/<chủ-đề>.md. "Báo xong" chưa phải là đạt.
+                """, access: .write, canDispatch: true,
+                fallbacks: [Profile(.claude, "opus"), Profile(.antigravity, "gemini-4-argon-medium")]),
+            Role(id: "planner", name: "Architect", contract: """
+                Thiết kế và viết khung để người làm không phải đoán. Mỗi phần việc là một thẻ `.agentteam/tasks/<id>.md` có đủ 5 mục:
+                ## Mục tiêu · ## File được sửa · ## Khung code (chữ ký hàm/kiểu, hoặc đường dẫn file stub bạn đã tạo)
+                · ## Test nghiệm thu (đường dẫn test + lệnh chạy) · ## Ngoài phạm vi.
+                Được tạo file khung/stub (chữ ký, kiểu, TODO) nhưng KHÔNG viết phần ruột. Ưu tiên cách đơn giản nhất đủ đáp ứng đề bài.
+                Việc phân tích/đề xuất: 1-3 phương án kèm đánh đổi, giả định, rủi ro, cách kiểm chứng, khuyến nghị.
+                Nhận báo lỗi SPEC_GAP: sửa thẻ việc hoặc khung cho đúng, báo ngắn đã đổi gì.
+                """, access: .write,
+                fallbacks: [Profile(.codex, "gpt-6.1-sol", effort: "high"), Profile(.antigravity, "claude-opus-5-5-high")]),
+            Role(id: "critic", name: "Critic", contract: """
+                Phản biện độc lập và kiểm tra rủi ro. Tìm giả định sai, rủi ro bỏ sót, trường hợp biên, cách đơn giản hơn; mỗi điểm
+                ghi mức độ (lớn/nhỏ), lý do, cách kiểm chứng. Không khen xã giao. Hết vấn đề đáng kể thì ghi đúng "KHÔNG CÒN PHẢN BÁC LỚN".
+                Kiểm tra đáp án cuối: chấm từng tiêu chí của đề bài (đạt/không, vì sao), xem câu trả lời có đúng trọng tâm câu hỏi gốc,
+                kết thúc bằng KẾT LUẬN: ĐẠT hoặc KẾT LUẬN: KHÔNG ĐẠT. Không sửa file dự án.
+                """, access: .readOnly,
+                fallbacks: [Profile(.antigravity, "gemini-4-argon-medium"), Profile(.claude, "sonnet")]),
+            Role(id: "worker", name: "Executor", contract: """
+                Làm đúng thẻ việc được giao. Chỉ sửa file trong mục "File được sửa"; giữ nguyên chữ ký trong "Khung code";
+                không sửa hay xoá test. Chạy lệnh trong "Test nghiệm thu" trước khi báo; chỉ báo xong khi đã pass.
+                Báo cáo: file đã sửa, lệnh đã chạy và output thật. Thẻ mơ hồ/không khả thi hoặc sửa 2 lần vẫn lỗi: dừng và nói rõ vì sao.
+                """, access: .write,
+                fallbacks: [Profile(.antigravity, "claude-sonnet-5-5-high"), Profile(.claude, "sonnet")], requiresCard: true),
+            Role(id: "testing", name: "Verifier", contract: """
+                Không sửa mã sản phẩm. Hai loại việc:
+                - Viết test trước theo mục "Test nghiệm thu" của thẻ việc; chạy để xác nhận đang thất bại; báo đường dẫn và lệnh.
+                - Nghiệm thu: đọc thay đổi, kiểm tra worker không sửa test và chỉ sửa file trong thẻ, architect không viết phần ruột;
+                  chạy test/build. Kết luận từng tiêu chí kèm bằng chứng. KHÔNG ĐẠT thì thêm đúng một dòng
+                  `PHÂN LOẠI: SPEC_GAP` (thẻ/khung sai hoặc thiếu) | `EXECUTION_DEFECT` (code sai) | `VERIFY_DEFECT` (test sai)
+                  | `EVIDENCE_MISSING` (thiếu bằng chứng), rồi dòng KẾT LUẬN.
+                """, access: .write,
+                fallbacks: [Profile(.antigravity, "gemini-3.8-flash-high"), Profile(.codex, "gpt-6-luna", effort: "medium")]),
+            Role(id: "research", name: "Research", contract: """
+                Tìm hiểu và tổng hợp: đọc tài liệu, mã nguồn, dữ liệu được chỉ định; trả lời đúng câu hỏi được giao kèm nguồn
+                (đường dẫn, file:line, link). Tách rõ điều đã kiểm chứng và điều suy đoán. Không sửa file dự án.
+                """, access: .readOnly,
+                fallbacks: [Profile(.antigravity, "gemini-3.8-flash-medium"), Profile(.claude, "haiku")]),
+        ], agents: [
+            Agent(roleId: "lead", profile: Profile(.codex, "gpt-6.1-sol", effort: "medium")),
+            Agent(roleId: "planner", profile: Profile(.claude, "opus")),
+            Agent(roleId: "critic", profile: Profile(.codex, "gpt-6.1-sol", effort: "medium")),
+            Agent(roleId: "worker", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
+            Agent(roleId: "testing", profile: Profile(.claude, "sonnet")),
+            Agent(roleId: "research", profile: Profile(.antigravity, "gemini-3.8-flash-high")),
+        ])
+    }
+
     static var assistantSetup: TeamSetup {
         TeamSetup(roles: [
             Role(id: "lead", name: "Assistant", contract: """

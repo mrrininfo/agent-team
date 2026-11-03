@@ -1308,6 +1308,21 @@ do {
     try? FileManager.default.removeItem(at: dir)
 }
 
+do {
+    let lite = TeamPreset.lite34.setup
+    check(lite.roles.count == 6 && Set(lite.roles.map(\.id)) == ["lead", "planner", "critic", "worker", "testing", "research"],
+          "v3.4 preset has the five seats plus Research, keeping role ids")
+    check(lite.roles.first { $0.id == "worker" }?.requiresCard == true && lite.roles.filter { $0.requiresCard == true }.count == 1,
+          "only the v3.4 Executor requires a task card")
+    check(Team.starter().roles.allSatisfy { $0.requiresCard != true } && TeamPreset.standard.setup.sameShape(as: Team.starter().setup),
+          "standard preset unchanged")
+    let old = #"{"id":"x","name":"X","contract":"c","access":"write","canDispatch":false,"fallbacks":[]}"#
+    check((try? jsonDecoder.decode(Role.self, from: Data(old.utf8)))?.requiresCard == nil, "roles saved before requiresCard still decode")
+    let critic = lite.agents.first { $0.roleId == "critic" }!.profile.provider
+    let architect = lite.agents.first { $0.roleId == "planner" }!.profile.provider
+    check(critic != architect, "Critic runs on a different model family than the Architect")
+}
+
 try await scenario()
 try await briefScenario()
 try await accountRotationScenario()
