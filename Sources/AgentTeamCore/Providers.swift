@@ -83,6 +83,10 @@ extension Provider {
             if !p.effort.isEmpty { a += ["--reasoning-effort", p.effort] }
             if let s = r.sessionId { a += ["--session-id", s] }
             return a + [r.prompt]
+        case .museWeb:
+            // The runner opens the chat's thread first (`session-start`), so a session id is always set here.
+            // Approvals are never auto-granted: a turn that needs one fails with the question and the role falls back.
+            return ["send", r.prompt] + (r.sessionId.map { ["--thread", $0] } ?? []) + ["--until-done", "--no-auto-approve"]
         }
     }
 }
@@ -95,6 +99,11 @@ public struct OutputParser {
     public init(_ provider: Provider) { self.provider = provider }
 
     public mutating func feed(_ line: String) -> [RunEvent] {
+        // muse-cli prints one indented JSON object when the turn ends; `finish()` reads it.
+        if provider == .museWeb {
+            if lastText.utf8.count < 4 << 20 { lastText += line + "\n" }
+            return []
+        }
         // Every event is a JSON object; skipping other lines cheaply matters when a CLI floods plain text.
         guard line.utf8.first(where: { $0 != 32 && $0 != 9 }) == UInt8(ascii: "{"), let data = line.data(using: .utf8),
               let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return [] }
@@ -103,6 +112,30 @@ public struct OutputParser {
         case .codex: return codex(o)
         case .antigravity: return antigravity(o)
         case .muse: return muse(o)
+        case .museWeb: return []
+        }
+    }
+
+    /// Called once stdout closes.
+    public mutating func finish() -> [RunEvent] {
+        guard provider == .museWeb, let start = lastText.firstIndex(of: "{"),
+              let o = (try? JSONSerialization.jsonObject(with: Data(lastText[start...].utf8))) as? [String: Any] else { return [] }
+        return [Self.museWeb(o)]
+    }
+
+    /// The object `muse-cli send` prints: outcome done | failed | needs_approval | needs_input | timeout.
+    static func museWeb(_ o: [String: Any]) -> RunEvent {
+        let reply = (o["reply"] as? [String: Any])?["text"] as? String
+        switch o["outcome"] as? String {
+        case "done":
+            return .final([o["final_text"] as? String, reply].compactMap { $0 }.first { !$0.isEmpty } ?? "")
+        case "needs_approval":
+            let asks = (o["approvals"] as? [[String: Any]] ?? []).map { "\($0["title"] as? String ?? "") — \($0["question"] as? String ?? "")" }
+            return .failure("Muse Web đang chờ duyệt trên muse.ai: \(asks.joined(separator: "; ")). Duyệt trên muse.ai rồi gửi lại.")
+        case "needs_input":
+            return .failure("Muse Web hỏi lại: \(o["question"] as? String ?? reply ?? "")")
+        case let outcome:
+            return .failure("Muse Web: lượt \(outcome ?? "không gửi được") (\(o["status"] as? String ?? o["note"] as? String ?? ""))")
         }
     }
 
@@ -299,7 +332,9 @@ public func isNetworkError(_ text: String) -> Bool {
 /// and the provider is retried after the cooldown, once the user has logged in.
 public func isSignedOutError(_ text: String) -> Bool {
     let t = text.lowercased()
-    return ["missing meta credentials", "not logged in", "requires a payment method", "please run /login"].contains { t.contains($0) }
+    return ["missing meta credentials", "not logged in", "requires a payment method", "please run /login",
+            // muse-cli: muse.ai cookies missing or expired; any provider: the CLI is not installed.
+            "auth error:", "không tìm thấy lệnh"].contains { t.contains($0) }
 }
 
 public func isAuthTimeout(_ text: String) -> Bool { text.lowercased().contains("authentication failed or timed out") }

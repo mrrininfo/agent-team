@@ -304,9 +304,18 @@ public final class ProcessRunner {
     /// `binaryPath` is the workspace's custom path for this provider, if any (several workspaces share one runner).
     public func run(chatId: String, request: TurnRequest, cwd: URL, binaryPath: String? = nil,
                     onEvent: @escaping @MainActor (RunEvent) -> Void) async -> String? {
+        var request = request
         let provider = request.profile.provider
         guard let bin = binary(for: provider, override: binaryPath) else {
             return "Không tìm thấy lệnh `\(provider.binaryName)`. Cài \(provider.title) CLI hoặc nhập đường dẫn trong tab Team."
+        }
+        if provider == .museWeb && request.sessionId == nil {
+            // Each chat gets its own muse.ai thread, so roles never share the main chat's context.
+            let (status, out) = await Self.capture(bin, ["session-start", "--title", "Agent Team \(chatId)"], cwd: cwd, path: searchPath)
+            guard status == 0, let o = (try? JSONSerialization.jsonObject(with: Data(out.utf8))) as? [String: Any],
+                  let id = o["session_id"] as? String else { return "exit \(status): " + tail(out.trimmingCharacters(in: .whitespacesAndNewlines), 1500) }
+            request.sessionId = id
+            await onEvent(.session(id))
         }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: bin)
@@ -370,7 +379,7 @@ public final class ProcessRunner {
                 deliver(lines.feed(d).flatMap { parser.feed($0) })
                 if lines.total > OutputLimits.maxTotal { ProcessRunner.terminateTree(pid); return true }
             }
-            deliver(lines.finish().map { parser.feed($0) } ?? [])
+            deliver((lines.finish().map { parser.feed($0) } ?? []) + parser.finish())
             return false
         }
         var status: Int32 = 0
@@ -380,6 +389,27 @@ public final class ProcessRunner {
             return "\(provider.title) in ra hơn \(OutputLimits.maxTotal >> 20) MB trong một lượt (có thể đang lặp). Đã dừng tiến trình để bảo vệ RAM."
         }
         return status == 0 ? nil : "exit \(status): " + tail(stderr.trimmingCharacters(in: .whitespacesAndNewlines), 1500)
+    }
+}
+
+extension ProcessRunner {
+    /// Runs a short helper command to completion; stdout and stderr together.
+    nonisolated static func capture(_ bin: String, _ args: [String], cwd: URL, path: String) async -> (Int32, String) {
+        await offPool {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: bin)
+            p.arguments = args
+            p.currentDirectoryURL = cwd
+            p.environment = ProcessInfo.processInfo.environment.merging(["PATH": path]) { $1 }
+            let out = Pipe()
+            p.standardOutput = out
+            p.standardError = out
+            p.standardInput = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return (-1, "không chạy được \(bin)") }
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            p.waitUntilExit()
+            return (p.terminationStatus, String(decoding: data, as: UTF8.self))
+        }
     }
 }
 
@@ -476,7 +506,7 @@ extension Provider {
         case .claude: ["auth", "status"]
         case .codex: ["login", "status"]
         case .antigravity: ["models"]
-        case .muse: ["usage", "--json"]
+        case .muse, .museWeb: ["usage", "--json"]
         }
     }
 
@@ -489,11 +519,21 @@ extension Provider {
         case .antigravity:
             return "echo 'Trong Antigravity gõ \(login ? "/login" : "/logout") rồi Enter; xong gõ /exit.'; \(b)"
         case .muse: return "\(b) \(login ? "login" : "logout")"
+        case .museWeb:
+            // muse-cli borrows the muse.ai login of the user's Chrome; logging out just forgets the copied cookies.
+            return login ? "echo 'Chrome: mở chrome://inspect/#remote-debugging, bật remote debugging, đăng nhập https://muse.ai rồi để tab đó mở.'; \(b) auth export"
+                : "rm -i ~/.config/muse-cli/cookies.txt"
         }
     }
 
     public func parseStatus(exit: Int32, output: String) -> AccountStatus {
         switch self {
+        case .museWeb:
+            guard exit == 0, let o = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any] else {
+                return AccountStatus(ok: false, detail: "chưa đăng nhập (bấm Login để chép đăng nhập muse.ai từ Chrome): " + tail(output, 160))
+            }
+            let used = (o["used_percent"] as? NSNumber).map { " · đã dùng \($0)%" } ?? ""
+            return AccountStatus(ok: true, detail: "đã đăng nhập · \(o["plan"] as? String ?? "muse.ai")" + used)
         case .muse:
             // `muse usage --json` needs a sign-in (account or META_API_KEY) and spends no model turn.
             let logged = exit == 0 && !output.localizedCaseInsensitiveContains("not logged in")

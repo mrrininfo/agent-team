@@ -1658,6 +1658,79 @@ do {
     AccountStore.accounts = []
 }
 
+do {
+    let args = Provider.museWeb.arguments(TurnRequest(prompt: "P", profile: Profile(.museWeb), sessionId: "t1", access: .readOnly))
+    check(args == ["send", "P", "--thread", "t1", "--until-done", "--no-auto-approve"] && !Provider.museWeb.promptViaStdin,
+          "muse web: one blocking send into the chat's own thread, never auto-approving (\(args))")
+    check(Provider.museWeb.parseStatus(exit: 2, output: "auth error: no cookies file; run `muse-cli auth export`").ok == false
+          && Provider.museWeb.parseStatus(exit: 0, output: #"{"plan": "Free", "used_percent": 12}"#).detail.contains("12%"),
+          "muse web: sign-in status and plan use from `muse-cli usage --json`")
+    check(isSignedOutError("auth error: auth/check -> 401 (cookies expired? re-export)")
+          && isSignedOutError("Không tìm thấy lệnh `muse-cli`. Cài Muse Web CLI hoặc nhập đường dẫn trong tab Team."),
+          "expired muse.ai cookies or a missing CLI fail over like a sign-out")
+    let lite = TeamPreset.lite34.setup
+    for id in ["critic", "research"] {
+        check(lite.agents.first { $0.roleId == id }?.profile.provider == .museWeb
+              && lite.roles.first { $0.id == id }?.fallbacks.first?.provider != .museWeb,
+              "v3.4: \(id) runs on Muse Web with a local-model fallback")
+    }
+}
+
+// muse-cli: a new chat opens its own muse.ai thread first, then reads the one JSON object `send` prints at the end.
+@MainActor func museWebScenario() async throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-museweb-\(shortId())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let log = dir.appendingPathComponent("calls.log").path
+    func script(_ name: String, _ send: String) throws -> String {
+        let f = dir.appendingPathComponent(name)
+        try """
+        #!/bin/sh
+        echo "$@" >> '\(log)'
+        if [ "$1" = session-start ]; then printf '{\\n  "session_id": "t9"\\n}\\n'; exit 0; fi
+        \(send)
+        """.write(to: f, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: f.path)
+        return f.path
+    }
+    let ok = try script("ok", #"printf '{\n  "sent": true,\n  "outcome": "done",\n  "final_text": "xong\\nhai dòng"\n}\n'"#)
+    let ask = try script("ask", #"printf '{\n  "outcome": "needs_approval",\n  "approvals": [{"title": "Mở web", "question": "cho phép example.com?"}]\n}\n'; exit 4"#)
+    let runner = ProcessRunner(helperDir: nil)
+    var events: [RunEvent] = []
+    let req = TurnRequest(prompt: "hỏi", profile: Profile(.museWeb), sessionId: nil, access: .readOnly)
+    let e1 = await runner.run(chatId: "a", request: req, cwd: dir, binaryPath: ok) { events.append($0) }
+    let calls = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+    check(e1 == nil && events.contains(.session("t9")) && events.contains(.final("xong\nhai dòng")),
+          "muse web: new thread then the final reply (\(e1 ?? "") \(events))")
+    check(calls.hasPrefix("session-start") && calls.contains("send hỏi --thread t9"), "muse web: send goes to the new thread (\(calls))")
+    try? FileManager.default.removeItem(atPath: log)
+    events = []
+    var resumed = req
+    resumed.sessionId = "t9"
+    let e2 = await runner.run(chatId: "b", request: resumed, cwd: dir, binaryPath: ask) { events.append($0) }
+    let calls2 = (try? String(contentsOfFile: log, encoding: .utf8)) ?? ""
+    let failure = events.compactMap { if case .failure(let t) = $0 { t } else { nil } }.first ?? ""
+    check(!calls2.contains("session-start") && e2 != nil && failure.contains("example.com"),
+          "muse web: a resumed chat reuses its thread; a pending approval fails the turn with the question (\(failure))")
+
+    // The Lead learns which seats cannot read local files; those seats are told so too.
+    var prompts: [String: String] = [:]
+    let o = try Orchestrator(workspace: dir) { _, req, _, emit in
+        prompts[req.profile.provider.rawValue] = req.prompt
+        emit(.final("ok"))
+        return nil
+    }
+    o.gitStatus = { _ in nil }
+    o.applySetup(TeamPreset.lite34.setup)
+    let lead = o.newChat(agentId: o.team.agents.first { $0.roleId == "lead" }!.id, title: "l")
+    let critic = o.newChat(agentId: o.team.agents.first { $0.roleId == "critic" }!.id, title: "c")
+    o.send("Alo", to: lead)
+    o.send("Soi phương án này", to: critic)
+    for _ in 0..<400 where [lead, critic].contains(where: { o.chat($0)?.status != .done }) { try? await Task.sleep(nanoseconds: 5_000_000) }
+    check(prompts["codex"]?.contains("dán nguyên văn") == true, "Lead is told to paste content for Muse Web seats")
+    check(prompts["museWeb"]?.contains("không đọc được file") == true, "a Muse Web seat is told it cannot read local files")
+    try? FileManager.default.removeItem(at: dir)
+}
+
 // A provider that is not signed in hands the work to the role's fallback instead of failing the chat.
 @MainActor func signedOutScenario() async throws {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent("agentteam-signout-\(shortId())")
@@ -1689,6 +1762,7 @@ do {
 
 try await scenario()
 try await signedOutScenario()
+try await museWebScenario()
 try await minorFixesScenario()
 try await reviewFixesScenario()
 try await goalCheckScenario()

@@ -109,10 +109,11 @@ struct TeamView: View {
         }
         HStack {
             // Muse keeps its sign-in in a place it does not let us move per account; extra Muse accounts use API keys.
-            if p != .muse {
+            // Muse Web has neither: one muse.ai login copied from Chrome.
+            if p != .muse && p != .museWeb {
                 Button("+ Đăng nhập tài khoản khác") { openTerminal(p, login: true, account: accounts.add(Account(provider: p, label: "\(p.title) \(accounts.list.filter { $0.provider == p }.count + 2)", kind: .login), key: nil)) }
             }
-            if p != .antigravity { Button("+ Thêm API key") { addingKey = p } }
+            if p != .antigravity && p != .museWeb { Button("+ Thêm API key") { addingKey = p } }
         }
         .buttonStyle(.link).font(.caption).padding(.leading, 18)
     }

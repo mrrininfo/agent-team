@@ -464,16 +464,21 @@ public final class Orchestrator {
     /// Each debate round costs the Lead two callback turns, so the loop guard never cuts a debate the user configured.
     var autoTurnCap: Int { max(team.maxAutoTurns, (team.debateRounds ?? 2) * 2 + 6) }
 
-    func preamble(_ chat: Chat, _ agent: Agent, _ role: Role) -> String {
+    func preamble(_ chat: Chat, _ agent: Agent, _ role: Role, profile: Profile? = nil) -> String {
+        let remote = profile?.provider == .museWeb ? "\nBạn chạy trên máy ảo muse.ai nên không đọc được file trên máy người dùng: chỉ dựa vào nội dung "
+            + "có trong tin nhắn. Thiếu nội dung file cần xem thì nói rõ cần file nào, không đoán." : ""
         var s = """
         # AGENT TEAM — HỢP ĐỒNG VAI TRÒ
         Bạn là \(role.name) (agent \(agent.id), chat \(chat.id)) trong một team AI. Workspace: \(paths.workspace.path)
-        Quyền: \(role.access.title).\(role.access == .readOnly ? " Không sửa file của dự án." : "")
+        Quyền: \(role.access.title).\(role.access == .readOnly ? " Không sửa file của dự án." : "")\(remote)
 
         \(role.contract)
         """
         if role.canDispatch {
             let carded = team.roles.filter { $0.requiresCard == true }.map(\.id)
+            let remoteSeats = team.agents.filter { team.effectiveProfile(for: $0)?.provider == .museWeb }.map(\.id)
+            let remoteRule = remoteSeats.isEmpty ? "" : "- \(remoteSeats.joined(separator: ", ")) chạy trên Muse Web, không đọc được file trên máy: "
+                + "dán nguyên văn nội dung cần xem (phương án, thẻ việc, đoạn code, số liệu) vào nội dung giao; việc phải đọc nhiều file thì giao vai trò khác.\n"
             let cardRule = carded.isEmpty ? "" : "- Thẻ việc: giao \(carded.joined(separator: ", ")) phải kèm `--card .agentteam/tasks/<id>.md` có đủ mục "
                 + TaskCard.sections.map { "## \($0)" }.joined(separator: ", ") + "; thiếu thì lệnh bị từ chối và nêu mục thiếu.\n\n"
             s += """
@@ -485,7 +490,7 @@ public final class Orchestrator {
             ## Giao việc
             - Giao việc mới: chạy lệnh shell `agentteam dispatch --from \(chat.id) --to <agentId|role> --new-task "<tiêu đề>" "<nội dung>"`.
             - Tiếp tục chat cũ của agent: thay `--new-task "<tiêu đề>"` bằng `--tab <chatId>`.
-            - Không tự chạy `claude`, `codex`, `agy` hay tự làm thay phần việc của vai trò khác (kể cả khi họ lỗi/limit):
+            \(remoteRule)- Không tự chạy `claude`, `codex`, `agy` hay tự làm thay phần việc của vai trò khác (kể cả khi họ lỗi/limit):
               app tự chuyển provider dự phòng theo đúng thứ tự cài đặt và tự thử lại khi lỗi mạng, việc hiện trong tab của vai trò đó.
               Vai trò báo lỗi thì giao lại bằng `--tab <chatId>` của họ.
             - Hết quota/limit (kể cả mọi fallback) KHÔNG phải lỗi: app giữ việc, tự chờ tới giờ reset rồi tự chạy tiếp và gửi kết quả về.
@@ -588,7 +593,7 @@ public final class Orchestrator {
         }
         // The brief goes on top of every turn, resumed ones too: a long session forgets the request after compaction.
         let pinned = briefBlock(c).flatMap { body.contains("# ĐỀ BÀI ĐANG LÀM") ? nil : $0 }
-        let prompt = (resumable ? "" : preamble(c, agent, role)) + (pinned ?? "") + body
+        let prompt = (resumable ? "" : preamble(c, agent, role, profile: profile)) + (pinned ?? "") + body
 
         // R1: Validate argv size before setting inFlight. If exceeded, keep in pending and report error.
         if !profile.provider.promptViaStdin && prompt.utf8.count > Provider.maxAntigravityPromptBytes {
