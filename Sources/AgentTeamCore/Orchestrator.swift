@@ -591,7 +591,7 @@ public final class Orchestrator {
         let prompt = (resumable ? "" : preamble(c, agent, role)) + (pinned ?? "") + body
 
         // R1: Validate argv size before setting inFlight. If exceeded, keep in pending and report error.
-        if profile.provider == .antigravity && prompt.utf8.count > Provider.maxAntigravityPromptBytes {
+        if !profile.provider.promptViaStdin && prompt.utf8.count > Provider.maxAntigravityPromptBytes {
             update(chatId) {
                 $0.status = .failed
                 $0.messages.append(Message(.system, "Lỗi: Prompt vượt ngưỡng argv của Antigravity (\(prompt.utf8.count) bytes > \(Provider.maxAntigravityPromptBytes)). Giữ nguyên pending; hãy rút gọn prompt hoặc chuyển sang provider hỗ trợ stdin (Claude/Codex)."))

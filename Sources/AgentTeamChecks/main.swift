@@ -1632,6 +1632,32 @@ do {
           "a failing goal-check Critic leaves a note instead of waking the Lead (\(err.lead))")
 }
 
+do {
+    // Lines recorded from `muse exec --json` (1.4.14), trimmed to the fields the parser reads.
+    var mp = OutputParser(.muse)
+    let sid = "01a19fb1-4aa4-7440-bf5b-8a26eadd175e"
+    func line(_ type: String, _ payload: String) -> String {
+        #"{"schema_version":1,"stream":{"kind":"session","id":"\#(sid)"},"record_type":"event","payload_type":"\#(type)","payload":\#(payload)}"#
+    }
+    let started = mp.feed(line("run.lifecycle.started", #"{"kind":"run_started","prompt":"hi"}"#))
+    let delta = mp.feed(line("run.output.delta", #"{"text":"đang làm"}"#))
+    let usage = mp.feed(line("run.usage", #"{"models":[{"model":"muse-spark-1.3","input_tokens":120,"cached_tokens":20,"output_tokens":30,"reasoning_tokens":5,"calls":1}],"allowance":null}"#))
+    let done = mp.feed(line("run.terminal.completed", #"{"kind":"run_terminal","terminal":"completed","text":"echo: hello one","reason":null}"#))
+    let failed = mp.feed(line("run.terminal.failed", #"{"kind":"run_terminal","terminal":"failed","text":null,"reason":"allowance exhausted"}"#))
+    check(started.contains(.session(sid)) && delta.contains(.progress("đang làm")), "muse: session id and progress from events")
+    check(usage.contains(.usage(135)) && usage.contains(.modelMetadata("muse-spark-1.3")), "muse: usage counts uncached input + output + reasoning, and reports the model")
+    check(done.contains(.final("echo: hello one")) && failed.contains(.failure("allowance exhausted")), "muse: terminal events give the answer or the failure")
+    let args = Provider.muse.arguments(TurnRequest(prompt: "P", profile: Profile(.muse, "muse-spark-1.3", effort: "medium"), sessionId: sid, access: .readOnly))
+    check(args.starts(with: ["exec", "--json"]) && args.contains("--session-id") && args.contains("--disable-shell") && args.last == "P"
+          && args.contains("--reasoning-effort") && !Provider.muse.promptViaStdin, "muse: headless args, resume, read-only, effort, prompt as argument")
+    check(Provider.muse.parseStatus(exit: 1, output: "muse usage: not logged in: run `muse login` first").ok == false
+          && Provider.muse.parseStatus(exit: 0, output: "{}").ok == true, "muse: sign-in status from `muse usage --json`")
+    AccountStore.keyLookup = { _ in "LLM_test" }
+    AccountStore.accounts = [Account(id: "m1", provider: .muse, label: "Muse API", kind: .apiKey)]
+    check(AccountStore.environment("m1")["META_API_KEY"] == "LLM_test", "muse API account runs with META_API_KEY")
+    AccountStore.accounts = []
+}
+
 try await scenario()
 try await minorFixesScenario()
 try await reviewFixesScenario()

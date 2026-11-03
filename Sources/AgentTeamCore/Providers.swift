@@ -36,8 +36,8 @@ public enum RunEvent: Equatable, Sendable {
 private func int(_ d: [String: Any]?, _ k: String) -> Int { (d?[k] as? NSNumber)?.intValue ?? 0 }
 
 extension Provider {
-    /// claude and codex read the prompt from stdin (no argv size limit); agy takes it as the -p value.
-    public var promptViaStdin: Bool { self != .antigravity }
+    /// claude and codex read the prompt from stdin (no argv size limit); agy and muse take it as an argument.
+    public var promptViaStdin: Bool { self == .claude || self == .codex }
 
     /// Conservative prompt limit in bytes when passing via argv (-p) on Antigravity;
     /// Claude and Codex use stdin and do not have this restriction.
@@ -75,6 +75,14 @@ extension Provider {
             if !p.effort.isEmpty { a += ["--effort", p.effort] }
             if let s = r.sessionId { a += ["--conversation", s] }
             return a
+        case .muse:
+            // Unattended: no approval prompts (the sandbox stays on) and questions to the user auto-cancel.
+            var a = ["exec", "--json", "--disable-approval", "--user-input-auto-resolve"]
+            if r.access == .readOnly { a += ["--disable-write"] + (r.canDispatch ? [] : ["--disable-shell"]) }
+            if !p.model.isEmpty { a += ["--model", p.model] }
+            if !p.effort.isEmpty { a += ["--reasoning-effort", p.effort] }
+            if let s = r.sessionId { a += ["--session-id", s] }
+            return a + [r.prompt]
         }
     }
 }
@@ -94,6 +102,7 @@ public struct OutputParser {
         case .claude: return claude(o)
         case .codex: return codex(o)
         case .antigravity: return antigravity(o)
+        case .muse: return muse(o)
         }
     }
 
@@ -176,6 +185,37 @@ public struct OutputParser {
         default:
             return []
         }
+    }
+
+    /// `muse exec --json`: one envelope per line, kind in `payload_type`, session id in `stream.id`.
+    mutating func muse(_ o: [String: Any]) -> [RunEvent] {
+        let p = o["payload"] as? [String: Any] ?? [:]
+        let type = o["payload_type"] as? String ?? ""
+        var ev: [RunEvent] = []
+        if let st = o["stream"] as? [String: Any], st["kind"] as? String == "session", let id = st["id"] as? String, id != lastText {
+            lastText = id  // one .session per id, not one per line
+            ev.append(.session(id))
+        }
+        switch type {
+        case "run.output.delta":
+            if let t = p["text"] as? String, !t.isEmpty { ev.append(.progress(t)) }
+        case "run.usage":
+            let models = p["models"] as? [[String: Any]] ?? []
+            let n = models.reduce(0) { $0 + int($1, "input_tokens") - int($1, "cached_tokens") + int($1, "output_tokens") + int($1, "reasoning_tokens") }
+            if n > 0 { ev.append(.usage(n)) }
+            if let m = models.compactMap({ $0["model"] as? String }).last { ev.append(.modelMetadata(m)) }
+        case let t where t.hasPrefix("run.terminal."):
+            if p["terminal"] as? String == "completed" {
+                ev.append(.final(p["text"] as? String ?? ""))
+            } else {
+                ev.append(.failure((p["reason"] as? String) ?? (p["text"] as? String) ?? "muse: lượt kết thúc \(p["terminal"] as? String ?? t)"))
+            }
+        case let t where t.contains("tool"):
+            let name = (p["tool_name"] ?? p["name"] ?? p["tool"]) as? String ?? t
+            ev.append(.progress("🔧 \(name)"))
+        default: break
+        }
+        return ev
     }
 
     mutating func antigravity(_ o: [String: Any]) -> [RunEvent] {

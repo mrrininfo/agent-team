@@ -476,6 +476,7 @@ extension Provider {
         case .claude: ["auth", "status"]
         case .codex: ["login", "status"]
         case .antigravity: ["models"]
+        case .muse: ["usage", "--json"]
         }
     }
 
@@ -487,11 +488,16 @@ extension Provider {
         case .codex: return "\(b) \(login ? "login" : "logout")"
         case .antigravity:
             return "echo 'Trong Antigravity gõ \(login ? "/login" : "/logout") rồi Enter; xong gõ /exit.'; \(b)"
+        case .muse: return "\(b) \(login ? "login" : "logout")"
         }
     }
 
     public func parseStatus(exit: Int32, output: String) -> AccountStatus {
         switch self {
+        case .muse:
+            // `muse usage --json` needs a sign-in (account or META_API_KEY) and spends no model turn.
+            let logged = exit == 0 && !output.localizedCaseInsensitiveContains("not logged in")
+            return AccountStatus(ok: logged, detail: logged ? "đã đăng nhập" : "chưa đăng nhập: " + tail(output, 160))
         case .claude:
             guard let o = try? JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
                   let logged = o["loggedIn"] as? Bool else { return AccountStatus(ok: exit == 0 ? nil : false, detail: tail(output, 200)) }

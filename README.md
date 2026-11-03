@@ -59,7 +59,8 @@ của login shell. Nếu không tìm thấy, nhập đường dẫn ở tab **Te
 
 15. **Nhiều tài khoản / API key**: Team & Provider → "+ Đăng nhập tài khoản khác" hoặc "+ Thêm API key". Tài khoản mặc định hết
     limit thì tự dùng tài khoản kế tiếp cùng provider rồi mới tới fallback. API key nằm trong Keychain, có giới hạn token/ngày.
-    Muse: thêm API key cho Claude Code với máy chủ `https://api.meta.ai`, rồi chọn tài khoản đó ở vị trí cần dùng.
+    Muse: provider riêng (cài Muse Code: `curl -fsSL https://dev.meta.ai/install.sh | bash`, rồi bấm Login ở dòng Muse),
+    hoặc API key `LLM_…` cho dòng Muse, hoặc API key cho Claude Code với máy chủ `https://api.meta.ai`.
 16. **Tab dự án, Tìm (⌘F), nói thay gõ**: dự án mở thành tab; 🔍 tìm từ khoá trong mọi chat; 🎙 dùng Đọc chính tả của macOS.
 
 ## Tiết kiệm token

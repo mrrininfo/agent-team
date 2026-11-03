@@ -103,7 +103,10 @@ struct TeamView: View {
             .padding(.leading, 18)
         }
         HStack {
-            Button("+ Đăng nhập tài khoản khác") { openTerminal(p, login: true, account: accounts.add(Account(provider: p, label: "\(p.title) \(accounts.list.filter { $0.provider == p }.count + 2)", kind: .login), key: nil)) }
+            // Muse keeps its sign-in in a place it does not let us move per account; extra Muse accounts use API keys.
+            if p != .muse {
+                Button("+ Đăng nhập tài khoản khác") { openTerminal(p, login: true, account: accounts.add(Account(provider: p, label: "\(p.title) \(accounts.list.filter { $0.provider == p }.count + 2)", kind: .login), key: nil)) }
+            }
             if p != .antigravity { Button("+ Thêm API key") { addingKey = p } }
         }
         .buttonStyle(.link).font(.caption).padding(.leading, 18)
@@ -546,7 +549,7 @@ struct AddKeySheet: View {
     var body: some View {
         Form {
             Text("Thêm API key cho \(provider.title)").font(.headline)
-            TextField("Tên hiển thị", text: $label, prompt: Text(provider == .claude ? "vd. Anthropic API, Muse" : "vd. OpenAI API"))
+            TextField("Tên hiển thị", text: $label, prompt: Text(provider == .claude ? "vd. Anthropic API, Muse" : provider == .muse ? "vd. Muse API (key bắt đầu bằng LLM_)" : "vd. OpenAI API"))
             SecureField("API key", text: $key)
             if provider == .claude {
                 TextField("Máy chủ (để trống = Anthropic)", text: $baseURL, prompt: Text("https://api.meta.ai"))

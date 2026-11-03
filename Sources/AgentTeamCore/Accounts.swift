@@ -82,6 +82,8 @@ public enum AccountStore {
             return env
         case .antigravity:
             return ["HOME": agyHome(d).path]
+        case .muse:
+            return key.map { ["META_API_KEY": $0] } ?? [:]
         }
     }
 

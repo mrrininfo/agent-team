@@ -1,7 +1,7 @@
 import Foundation
 
 public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
-    case claude, codex, antigravity
+    case claude, codex, antigravity, muse
 
     public var id: String { rawValue }
 
@@ -10,6 +10,7 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .claude: "Claude Code"
         case .codex: "Codex"
         case .antigravity: "Antigravity"
+        case .muse: "Muse"
         }
     }
 
@@ -18,6 +19,7 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .claude: "claude"
         case .codex: "codex"
         case .antigravity: "agy"
+        case .muse: "muse"
         }
     }
 
@@ -28,6 +30,7 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         case .codex: ["gpt-6.1-sol", "gpt-6-luna"]
         case .antigravity: ["gemini-4-argon-high", "gemini-4-argon-medium", "gemini-3.8-flash-high", "gemini-3.8-flash-medium",
                              "claude-opus-5-5-high", "claude-sonnet-5-5-high", "claude-sonnet-5-5-medium", "gpt-oss-120b-medium"]
+        case .muse: ["muse-spark-1.3", "muse-wonder-1.0", "muse-spark-1.2"]
         }
     }
 
@@ -37,6 +40,7 @@ public enum Provider: String, Codable, CaseIterable, Identifiable, Sendable {
         switch self {
         case .claude, .antigravity: [""]
         case .codex: ["", "low", "medium", "high"]
+        case .muse: ["", "low", "medium", "high", "xhigh", "max"]
         }
     }
 }

@@ -79,6 +79,7 @@ struct QuotaPanel: View {
                         case .reading:
                             Text(p == .antigravity
                                  ? "Đang đọc từ agy (khoảng 20 giây)… Bấm Làm mới nếu chưa thấy."
+                                 : p == .muse ? "App chưa đọc tự động hạn mức Muse; xem bằng lệnh `muse usage` trong Terminal."
                                  : "Đang đọc dữ liệu quota…")
                                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         case .noBinary:
